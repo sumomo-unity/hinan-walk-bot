@@ -286,7 +286,7 @@ async function handleEvent(event) {
   if (event.type === "message" && event.message.type === "text") {
     const text = event.message.text.trim();
 
-    // A. 「スタート」入力時（お問い合わせを受け付けていない注意書きをここでのみ表示）
+    // ── A. 「スタート」（訓練中・終了後どちらでも受付可能） ──
     if (text === "スタート" || text === "開始" || text === "避難訓練") {
       userSessions.delete(userId); // 前回の記録をクリア
       return client.replyMessage({
@@ -304,120 +304,111 @@ async function handleEvent(event) {
       });
     }
 
-    // B. 「リセット」「中止」「キャンセル」
-    if (text === "リセット" || text === "中止" || text === "キャンセル") {
-      userSessions.delete(userId);
-      return client.replyMessage({
-        replyToken: event.replyToken,
-        messages: [
-          {
-            type: "text",
-            text: "避難訓練の記録をリセットしました。\n新しく訓練を始めるには「スタート」と送信してください。"
-          }
-        ]
-      });
-    }
+    // ── B. スタート中（避難訓練中）の場合 ──
+    if (session) {
+      // ① 「リセット」
+      if (text === "リセット" || text === "中止" || text === "キャンセル") {
+        userSessions.delete(userId);
+        return client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text: "避難訓練の記録をリセットしました。\n新しく訓練を始めるには「スタート」と送信してください。"
+            }
+          ]
+        });
+      }
 
-    // C. 「ゴール」「到着」「終了」（途中でやめたくなった場合も対応）
-    if (text === "ゴール" || text === "到着" || text === "避難完了" || text === "終了") {
-      if (!session || !session.startLocation || !session.startTime) {
+      // ② 「ゴール」
+      if (text === "ゴール" || text === "到着" || text === "避難完了" || text === "終了") {
+        if (!session.startLocation || !session.startTime) {
+          return client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  "避難訓練がまだスタートしていません。\n" +
+                  "LINEの「＋」ボタンからスタート地点の【位置情報】を送信してください。"
+              }
+            ]
+          });
+        }
+
+        // ゴール時刻を記録
+        session.goalTime = Date.now();
+        session.status = "WAITING_GOAL_LOCATION";
+        userSessions.set(userId, session);
+
+        const goalTimeStr = new Date(session.goalTime).toLocaleTimeString("ja-JP", {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        });
+
         return client.replyMessage({
           replyToken: event.replyToken,
           messages: [
             {
               type: "text",
               text:
-                "避難訓練がまだスタートしていません。\n" +
-                "「スタート」と送信して避難所を選び、LINEの「＋」ボタンからスタート地点の【位置情報】を送信してください。"
+                `🏁 ゴール時刻（${goalTimeStr}）を記録しました！\n\n` +
+                "避難時間と移動距離を計算しますので、LINE画面左下の「＋」ボタンから現在の【位置情報】を送信してください。"
             }
           ]
         });
       }
 
-      // ゴール時刻を記録
-      session.goalTime = Date.now();
-      session.status = "WAITING_GOAL_LOCATION";
-      userSessions.set(userId, session);
+      // ③ スタート中は「スタート」「リセット」「ゴール」以外のテキストはすべて無視
+      return Promise.resolve(null);
+    }
 
-      const goalTimeStr = new Date(session.goalTime).toLocaleTimeString("ja-JP", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit"
-      });
-
+    // ── C. ゴール後 / 未開始時の場合 ──
+    // ① 「使い方」
+    if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
       return client.replyMessage({
         replyToken: event.replyToken,
         messages: [
           {
             type: "text",
             text:
-              `🏁 ゴール時刻（${goalTimeStr}）を記録しました！\n\n` +
-              "避難時間と移動距離を計算しますので、LINE画面左下の「＋」ボタンから現在の【位置情報】を送信してください。"
+              "📖 【避難ウォークBot の使い方】\n\n" +
+              "各コマンドを入力した際の動作説明です：\n\n" +
+              "🔹「スタート」\n" +
+              "熊谷市の避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始されます。\n" +
+              "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
+              "🔹「ゴール」\n" +
+              "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標達成判定が表示されます。\n\n" +
+              "🔹「リセット」\n" +
+              "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
+              "🔹「使い方」\n" +
+              "この説明テキストを表示します（ゴール後・未開始時のみ有効）。\n\n" +
+              "──────────────────\n" +
+              "※ 訓練中は「スタート」「リセット」「ゴール」以外のメッセージは無視されます。\n" +
+              "※ 終了後は「スタート」「使い方」以外のメッセージは無視されます。"
           }
         ]
       });
     }
 
-    // D. 避難中のその他メッセージ
-    if (session && session.startTime) {
-      const elapsedSeconds = Math.max(0, Math.floor((Date.now() - session.startTime) / 1000));
-      const mins = Math.floor(elapsedSeconds / 60);
-      const secs = elapsedSeconds % 60;
-      const timeStr = mins > 0 ? `${mins}分 ${secs}秒` : `${secs}秒`;
-      const shelterName = session.targetShelter ? session.targetShelter.name : "避難所";
-
-      return client.replyMessage({
-        replyToken: event.replyToken,
-        messages: [
-          {
-            type: "text",
-            text:
-              `🏃‍♂️ 現在、避難訓練の計測中です！\n` +
-              `🎯 目標避難所: ${shelterName}\n` +
-              `⏱️ 現在の経過時間: 約 ${timeStr}\n\n` +
-              `到着した際、または途中でやめたい場合も「ゴール」とメッセージを送るか、LINEの「＋」ボタンから【位置情報】を送信してください。\n` +
-              `※最初からやり直す場合は「スタート」と送信してください。`
-          }
-        ]
-      });
-    }
-
-    // E. 避難所選択待ちの場合
-    if (session && session.status === "WAITING_START_LOCATION") {
-      return client.replyMessage({
-        replyToken: event.replyToken,
-        messages: [
-          {
-            type: "text",
-            text:
-              `🏢 目標避難所「${session.targetShelter.name}」が設定されています。\n\n` +
-              "LINE画面左下の「＋」ボタンからスタート地点の【位置情報】を送信して訓練を開始してください。"
-          }
-        ]
-      });
-    }
-
-    // F. 未開始時
-    return client.replyMessage({
-      replyToken: event.replyToken,
-      messages: [
-        {
-          type: "text",
-          text:
-            "「スタート」と送信すると、熊谷市の避難所一覧が表示されて避難訓練を始められます！"
-        }
-      ]
-    });
+    // ② ゴール後は「スタート」「使い方」以外の入力はすべて無視
+    return Promise.resolve(null);
   }
 
   // 3. 位置情報メッセージ処理（スタート登録 / ゴール登録＆計算）
   if (event.type === "message" && event.message.type === "location") {
+    // 訓練未開始時は位置情報を無視
+    if (!session) {
+      return Promise.resolve(null);
+    }
+
     const lat = event.message.latitude;
     const lng = event.message.longitude;
 
     // ① スタート地点の登録（まだ開始していない、または目標避難所設定直後）
-    if (!session || !session.startLocation || !session.startTime) {
-      const targetShelter = (session && session.targetShelter) || KUMAGAYA_SHELTERS[0];
+    if (!session.startLocation || !session.startTime) {
+      const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
 
       // 避難所までの初期直線距離
       const initialDist = calculateHaversineDistance(
@@ -427,15 +418,10 @@ async function handleEvent(event) {
         targetShelter.lng
       );
 
-      session = {
-        status: "WALKING",
-        targetShelter: targetShelter,
-        startLocation: { lat, lng },
-        startTime: Date.now(),
-        initialDistance: initialDist,
-        goalLocation: null,
-        goalTime: null
-      };
+      session.status = "WALKING";
+      session.startLocation = { lat, lng };
+      session.startTime = Date.now();
+      session.initialDistance = initialDist;
       userSessions.set(userId, session);
 
       const startTimeStr = new Date(session.startTime).toLocaleTimeString("ja-JP", {
@@ -543,7 +529,7 @@ async function handleEvent(event) {
       `避難訓練お疲れ様でした！\n` +
       `もう一度行う場合は「スタート」と送信してください。`;
 
-    // セッションリセット
+    // セッションリセット（ゴール後状態へ遷移）
     userSessions.delete(userId);
 
     return client.replyMessage({
