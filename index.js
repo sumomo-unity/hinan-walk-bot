@@ -89,7 +89,7 @@ async function handleEvent(event) {
 }
 
 // サーバーの起動処理（これが抜けていたため起動しませんでした）
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Bot is running on port ${PORT}`);
 });
