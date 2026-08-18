@@ -1,17 +1,14 @@
 {
   "name": "line-bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "Hinan Walk Bot",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "@line/bot-sdk": "^11.2.0",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "firebase-admin": "^12.0.0"
   }
 }
