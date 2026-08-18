@@ -113,6 +113,61 @@ const KUMAGAYA_SHELTERS = [
 const memorySessions = new Map();
 const memoryLogs = [];
 
+// ── 3.5. タイムゾーン対応関数（NEW） ──
+/**
+ * 現在時刻を日本標準時（JST / Asia/Tokyo）で取得
+ * @returns {number} ミリ秒単位のタイムスタンプ
+ */
+function getJapanNowTimestamp() {
+  return Date.now();
+}
+
+/**
+ * タイムスタンプを日本時間の ISO 8601 文字列に変換
+ * @param {number} timestamp - ミリ秒単位のタイムスタンプ
+ * @returns {string} ISO 8601 形式の日本時間文字列
+ */
+function toJapanISOString(timestamp) {
+  return new Date(timestamp).toLocaleString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).replace(/(\d+)\/(\d+)\/(\d+)\s(\d+):(\d+):(\d+)/, "$3-$1-$2T$4:$5:$6+09:00");
+}
+
+/**
+ * タイムスタンプを日本時間のフォーマット済み文字列に変換
+ * @param {number} timestamp - ミリ秒単位のタイムスタンプ
+ * @returns {string} 日本時間の表示用文字列
+ */
+function formatJapanTime(timestamp) {
+  return new Date(timestamp).toLocaleTimeString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+}
+
+/**
+ * タイムスタンプを日本時間の日付情報に変換
+ * @param {number} timestamp - ミリ秒単位のタイムスタンプ
+ * @returns {string} 日本時間の日付表示用文字列
+ */
+function formatJapanDate(timestamp) {
+  return new Date(timestamp).toLocaleDateString("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 // ── 4. セッション管理（Firestore / メモリ両対応） ──
 async function getSession(userId) {
   if (db) {
@@ -635,15 +690,11 @@ async function handleEvent(event) {
             });
           }
 
-          session.goalTime = Date.now();
+          session.goalTime = getJapanNowTimestamp();
           session.status = "WAITING_GOAL_LOCATION";
           await saveSession(userId, session);
 
-          const goalTimeStr = new Date(session.goalTime).toLocaleTimeString("ja-JP", {
-            hour: "2-digit",
-            minute: "2-digit",
-            second: "2-digit"
-          });
+          const goalTimeStr = formatJapanTime(session.goalTime);
 
           return client.replyMessage({
             replyToken: event.replyToken,
@@ -674,10 +725,11 @@ async function handleEvent(event) {
                 "📖 【避難ウォークBot の使い方】\n\n" +
                 "各コマンドを入力した際の動作説明です：\n\n" +
                 "🔹「スタート」\n" +
-                "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始されます。\n" +
+                "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します。\n\n" +
+                "🔹「スタート」（訓練中に送信）\n" +
                 "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
                 "🔹「ゴール」\n" +
-                "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標達成度が表示されます。\n\n" +
+                "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が計算されます。\n\n" +
                 "🔹「リセット」\n" +
                 "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
                 "🔹「履歴」\n" +
@@ -709,12 +761,10 @@ async function handleEvent(event) {
 
         let historyMsg = "📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n";
         history.forEach((h, idx) => {
-          const dateStr = new Date(h.startTime).toLocaleDateString("ja-JP", {
-            month: "numeric",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit"
-          });
+          // startTime がタイムスタンプ（数値）の場合と ISO 文字列の場合の両方に対応
+          const startTimestamp = typeof h.startTime === "number" ? h.startTime : new Date(h.startTime).getTime();
+          const dateStr = formatJapanDate(startTimestamp);
+          
           const mins = Math.floor((h.elapsedSeconds || 0) / 60);
           const secs = (h.elapsedSeconds || 0) % 60;
           const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
@@ -772,16 +822,12 @@ async function handleEvent(event) {
 
         session.status = "WALKING";
         session.startLocation = { lat, lng };
-        session.startTime = Date.now();
+        session.startTime = getJapanNowTimestamp();
         session.initialDistance = routeInfo.distanceMeters;
         session.isRouteApi = routeInfo.isRouteApi;
         await saveSession(userId, session);
 
-        const startTimeStr = new Date(session.startTime).toLocaleTimeString("ja-JP", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        });
+        const startTimeStr = formatJapanTime(session.startTime);
 
         const fallbackNotice = routeInfo.notice || "";
 
@@ -806,7 +852,7 @@ async function handleEvent(event) {
       }
 
       // ② ゴール地点の登録 ＆ 時間・徒歩距離の計算
-      const endTime = session.goalTime || Date.now();
+      const endTime = session.goalTime || getJapanNowTimestamp();
       const goalLat = lat;
       const goalLng = lng;
       const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
@@ -877,14 +923,31 @@ async function handleEvent(event) {
         `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
 
       // 研究用ログを Firestore / メモリに保存
+      // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存
       const drillLog = {
         drillId: `drill_${Date.now()}_${userId.slice(-6)}`,
         userId: userId,
         shelterId: targetShelter.id,
         shelterName: targetShelter.name,
         shelterCity: targetShelter.city || "熊谷市",
-        startTime: new Date(session.startTime).toISOString(),
-        endTime: new Date(endTime).toISOString(),
+        startTime: new Date(session.startTime).toLocaleString("ja-JP", {
+          timeZone: "Asia/Tokyo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        }),
+        endTime: new Date(endTime).toLocaleString("ja-JP", {
+          timeZone: "Asia/Tokyo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit"
+        }),
         elapsedSeconds: elapsedSeconds,
         startLat: session.startLocation.lat,
         startLng: session.startLocation.lng,
@@ -939,4 +1002,5 @@ async function handleEvent(event) {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Hinan Walk Bot server is running on port ${PORT}`);
+  console.log("📅 Timezone: Asia/Tokyo (JST / UTC+9)");
 });
