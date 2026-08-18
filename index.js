@@ -11,8 +11,66 @@ const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
 });
 
+// 熊谷市 避難所マスタデータ（JSON化）
+const KUMAGAYA_SHELTERS = [
+  {
+    id: "kumagaya_1",
+    name: "熊谷市役所（本庁舎）",
+    type: "指定緊急避難場所",
+    address: "埼玉県熊谷市宮町2丁目47-1",
+    lat: 36.147285,
+    lng: 139.388701,
+    tagColor: "#27ae60"
+  },
+  {
+    id: "kumagaya_2",
+    name: "熊谷市立熊谷東小学校",
+    type: "指定避難所（地震・水害）",
+    address: "埼玉県熊谷市末広3丁目1-1",
+    lat: 36.148150,
+    lng: 139.397620,
+    tagColor: "#2980b9"
+  },
+  {
+    id: "kumagaya_3",
+    name: "熊谷市立熊谷南小学校",
+    type: "指定避難所（地震・水害）",
+    address: "埼玉県熊谷市万平町2丁目1",
+    lat: 36.136200,
+    lng: 139.387800,
+    tagColor: "#2980b9"
+  },
+  {
+    id: "kumagaya_4",
+    name: "熊谷市立熊谷西小学校",
+    type: "指定避難所（地震）",
+    address: "埼玉県熊谷市新島123",
+    lat: 36.155800,
+    lng: 139.369500,
+    tagColor: "#2980b9"
+  },
+  {
+    id: "kumagaya_5",
+    name: "熊谷スポーツ文化公園",
+    type: "広域避難場所",
+    address: "埼玉県熊谷市上川上300",
+    lat: 36.166800,
+    lng: 139.412500,
+    tagColor: "#e67e22"
+  },
+  {
+    id: "kumagaya_6",
+    name: "妻沼中央公民館",
+    type: "指定避難所",
+    address: "埼玉県熊谷市妻沼東1丁目1",
+    lat: 36.231200,
+    lng: 139.387500,
+    tagColor: "#8e44ad"
+  }
+];
+
 // ユーザーごとのセッション管理（メモリ保持）
-// userId => { status, startLocation, startTime, goalLocation, goalTime }
+// userId => { status, targetShelter, startLocation, startTime, goalLocation, goalTime }
 const userSessions = new Map();
 
 /**
@@ -36,6 +94,135 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   return R * c; // メートル
 }
 
+/**
+ * 熊谷市 避難所一覧 Flex Message（カルーセル形式）を作成
+ */
+function createKumagayaShelterFlex() {
+  const bubbles = KUMAGAYA_SHELTERS.map((shelter) => {
+    const mapUrl = `https://www.google.com/maps/search/?api=1&query=${shelter.lat},${shelter.lng}`;
+
+    return {
+      type: "bubble",
+      size: "kilo",
+      header: {
+        type: "box",
+        layout: "vertical",
+        backgroundColor: shelter.tagColor,
+        paddingAll: "md",
+        contents: [
+          {
+            type: "text",
+            text: shelter.type,
+            color: "#ffffff",
+            size: "xs",
+            weight: "bold"
+          },
+          {
+            type: "text",
+            text: shelter.name,
+            color: "#ffffff",
+            size: "md",
+            weight: "bold",
+            wrap: true,
+            margin: "xs"
+          }
+        ]
+      },
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "none",
+            contents: [
+              {
+                type: "text",
+                text: "📍 所在地",
+                size: "xs",
+                color: "#888888",
+                weight: "bold"
+              },
+              {
+                type: "text",
+                text: shelter.address,
+                size: "xs",
+                color: "#333333",
+                wrap: true,
+                margin: "xs"
+              }
+            ]
+          },
+          {
+            type: "box",
+            layout: "vertical",
+            spacing: "none",
+            contents: [
+              {
+                type: "text",
+                text: "🌐 座標",
+                size: "xs",
+                color: "#888888",
+                weight: "bold"
+              },
+              {
+                type: "text",
+                text: `北緯 ${shelter.lat.toFixed(4)} / 東経 ${shelter.lng.toFixed(4)}`,
+                size: "xs",
+                color: "#666666",
+                margin: "xs"
+              }
+            ]
+          }
+        ]
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          {
+            type: "button",
+            style: "secondary",
+            height: "sm",
+            action: {
+              type: "uri",
+              label: "🗺️ 地図を見る",
+              uri: mapUrl
+            }
+          },
+          {
+            type: "button",
+            style: "primary",
+            color: shelter.tagColor,
+            height: "sm",
+            action: {
+              type: "postback",
+              label: "🎯 ここへ避難する",
+              data: JSON.stringify({
+                action: "select_shelter",
+                shelterId: shelter.id
+              }),
+              displayText: `「${shelter.name}」を目標避難所に設定しました`
+            }
+          }
+        ]
+      }
+    };
+  });
+
+  return {
+    type: "flex",
+    altText: "熊谷市の避難所一覧",
+    contents: {
+      type: "carousel",
+      contents: bubbles
+    }
+  };
+}
+
 // Express アプリケーション設定
 const app = express();
 
@@ -49,34 +236,74 @@ app.post("/webhook", line.middleware(config), (req, res) => {
 });
 
 /**
- * イベント振り分け処理（テキスト・位置情報のみのシンプル構成）
+ * イベント振り分け処理
  */
 async function handleEvent(event) {
   const userId = event.source.userId || "anonymous";
   let session = userSessions.get(userId);
 
-  // 1. テキストメッセージ処理
+  // 1. Postback イベント処理（避難所選択時）
+  if (event.type === "postback") {
+    try {
+      const data = JSON.parse(event.postback.data);
+
+      if (data.action === "select_shelter") {
+        const shelter = KUMAGAYA_SHELTERS.find((s) => s.id === data.shelterId);
+        if (!shelter) return null;
+
+        // セッション作成（目標避難所を設定）
+        session = {
+          status: "WAITING_START_LOCATION",
+          targetShelter: shelter,
+          startLocation: null,
+          startTime: null,
+          goalLocation: null,
+          goalTime: null
+        };
+        userSessions.set(userId, session);
+
+        return client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🏢 目標避難所を「${shelter.name}」に設定しました！\n\n` +
+                "避難を開始します。\n" +
+                "LINE画面左下の「＋」ボタンからスタート地点の【位置情報】を送信してください。"
+            }
+          ]
+        });
+      }
+    } catch (e) {
+      console.error("Postback parse error:", e);
+    }
+    return null;
+  }
+
+  // 2. テキストメッセージ処理
   if (event.type === "message" && event.message.type === "text") {
     const text = event.message.text.trim();
 
-    // A. 「スタート」または「開始」
+    // A. 「スタート」入力時（お問い合わせを受け付けていない注意書きをここでのみ表示）
     if (text === "スタート" || text === "開始" || text === "避難訓練") {
-      userSessions.delete(userId); // 前回の記録をクリアして再設定可能にする
+      userSessions.delete(userId); // 前回の記録をクリア
       return client.replyMessage({
         replyToken: event.replyToken,
         messages: [
           {
             type: "text",
             text:
-              "🚨 避難ウォーク訓練を開始します！\n\n" +
-              "まずはスタート地点を設定します。\n" +
-              "LINE画面左下の「＋」ボタンをタップし、【位置情報】を送信してください。"
-          }
+              "🚨 避難ウォーク訓練を開始します！\n" +
+              "※本Botは避難訓練専用です。個別のお問い合わせには対応しておりません。\n\n" +
+              "まずは目指す【目標避難所】を以下の一覧から選択してください。"
+          },
+          createKumagayaShelterFlex()
         ]
       });
     }
 
-    // B. 「リセット」または「中止」
+    // B. 「リセット」「中止」「キャンセル」
     if (text === "リセット" || text === "中止" || text === "キャンセル") {
       userSessions.delete(userId);
       return client.replyMessage({
@@ -90,8 +317,8 @@ async function handleEvent(event) {
       });
     }
 
-    // C. 「ゴール」または「到着」
-    if (text === "ゴール" || text === "到着" || text === "避難完了") {
+    // C. 「ゴール」「到着」「終了」（途中でやめたくなった場合も対応）
+    if (text === "ゴール" || text === "到着" || text === "避難完了" || text === "終了") {
       if (!session || !session.startLocation || !session.startTime) {
         return client.replyMessage({
           replyToken: event.replyToken,
@@ -100,7 +327,7 @@ async function handleEvent(event) {
               type: "text",
               text:
                 "避難訓練がまだスタートしていません。\n" +
-                "「スタート」と送信した後に、LINEの「＋」ボタンからスタート地点の【位置情報】を送信してください。"
+                "「スタート」と送信して避難所を選び、LINEの「＋」ボタンからスタート地点の【位置情報】を送信してください。"
             }
           ]
         });
@@ -124,18 +351,19 @@ async function handleEvent(event) {
             type: "text",
             text:
               `🏁 ゴール時刻（${goalTimeStr}）を記録しました！\n\n` +
-              "避難時間と移動距離を計算しますので、LINE画面左下の「＋」ボタンからゴール地点の【位置情報】を送信してください。"
+              "避難時間と移動距離を計算しますので、LINE画面左下の「＋」ボタンから現在の【位置情報】を送信してください。"
           }
         ]
       });
     }
 
-    // D. 避難中の状況確認やその他のテキスト
+    // D. 避難中のその他メッセージ
     if (session && session.startTime) {
       const elapsedSeconds = Math.max(0, Math.floor((Date.now() - session.startTime) / 1000));
       const mins = Math.floor(elapsedSeconds / 60);
       const secs = elapsedSeconds % 60;
       const timeStr = mins > 0 ? `${mins}分 ${secs}秒` : `${secs}秒`;
+      const shelterName = session.targetShelter ? session.targetShelter.name : "避難所";
 
       return client.replyMessage({
         replyToken: event.replyToken,
@@ -143,38 +371,56 @@ async function handleEvent(event) {
           {
             type: "text",
             text:
-              `🏃‍♂️ 現在、避難訓練の計測中です！\n\n` +
+              `🏃‍♂️ 現在、避難訓練の計測中です！\n` +
+              `🎯 目標避難所: ${shelterName}\n` +
               `⏱️ 現在の経過時間: 約 ${timeStr}\n\n` +
-              `避難所に到着したら「ゴール」とメッセージを送るか、LINEの「＋」ボタンから【位置情報】を送信してください。\n` +
-              `※ やり直したい場合は「リセット」または「スタート」と送信してください。`
+              `到着した際、または途中でやめたい場合も「ゴール」とメッセージを送るか、LINEの「＋」ボタンから【位置情報】を送信してください。\n` +
+              `※最初からやり直す場合は「スタート」と送信してください。`
           }
         ]
       });
     }
 
-    // E. 未開始時の通常テキスト
+    // E. 避難所選択待ちの場合
+    if (session && session.status === "WAITING_START_LOCATION") {
+      return client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              `🏢 目標避難所「${session.targetShelter.name}」が設定されています。\n\n` +
+              "LINE画面左下の「＋」ボタンからスタート地点の【位置情報】を送信して訓練を開始してください。"
+          }
+        ]
+      });
+    }
+
+    // F. 未開始時
     return client.replyMessage({
       replyToken: event.replyToken,
       messages: [
         {
           type: "text",
           text:
-            "「スタート」と送信すると、避難訓練が始まります！\n" +
-            "スタート後に現在地（位置情報）を送り、到着したら「ゴール」と送信してください。"
+            "「スタート」と送信すると、熊谷市の避難所一覧が表示されて避難訓練を始められます！"
         }
       ]
     });
   }
 
-  // 2. 位置情報メッセージ処理（スタート地点登録 or ゴール地点登録＆計算）
+  // 3. 位置情報メッセージ処理（スタート登録 / ゴール登録＆計算）
   if (event.type === "message" && event.message.type === "location") {
     const lat = event.message.latitude;
     const lng = event.message.longitude;
 
-    // ① スタート地点の登録（まだ開始していない、またはスタート直後）
+    // ① スタート地点の登録（まだ開始していない、または目標避難所設定直後）
     if (!session || !session.startLocation || !session.startTime) {
+      const targetShelter = (session && session.targetShelter) || KUMAGAYA_SHELTERS[0];
+
       session = {
         status: "WALKING",
+        targetShelter: targetShelter,
         startLocation: { lat, lng },
         startTime: Date.now(),
         goalLocation: null,
@@ -188,6 +434,18 @@ async function handleEvent(event) {
         second: "2-digit"
       });
 
+      // 避難所までの初期直線距離
+      const initialDist = calculateHaversineDistance(
+        lat,
+        lng,
+        targetShelter.lat,
+        targetShelter.lng
+      );
+      const initialDistText =
+        initialDist >= 1000
+          ? `${(initialDist / 1000).toFixed(2)} km (${Math.round(initialDist)} m)`
+          : `${Math.round(initialDist)} m`;
+
       return client.replyMessage({
         replyToken: event.replyToken,
         messages: [
@@ -195,10 +453,12 @@ async function handleEvent(event) {
             type: "text",
             text:
               `🚀 【避難開始】を記録しました！\n\n` +
+              `🎯 目標避難所: ${targetShelter.name}\n` +
               `⏰ 開始時刻: ${startTimeStr}\n` +
-              `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n\n` +
+              `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n` +
+              `📏 避難所までの直線距離: 約 ${initialDistText}\n\n` +
               `周囲の安全に注意して避難所へ向かってください。\n\n` +
-              `避難所に到着したら「ゴール」と送信するか、LINEの「＋」ボタンから現在地（位置情報）を送信してください。`
+              `到着時、または途中でやめたくなった場合も「ゴール」と送信するか、現在地（位置情報）を送信してください。`
           }
         ]
       });
@@ -208,6 +468,7 @@ async function handleEvent(event) {
     const endTime = session.goalTime || Date.now();
     const goalLat = lat;
     const goalLng = lng;
+    const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
 
     // 時間計算（差分）
     const elapsedSeconds = Math.max(1, Math.floor((endTime - session.startTime) / 1000));
@@ -215,7 +476,7 @@ async function handleEvent(event) {
     const seconds = elapsedSeconds % 60;
     const timeText = minutes > 0 ? `${minutes}分 ${seconds}秒` : `${seconds}秒`;
 
-    // 距離計算（Haversine式）
+    // 距離計算（Haversine式: スタート地点〜ゴール地点の移動距離）
     const walkedDistance = calculateHaversineDistance(
       session.startLocation.lat,
       session.startLocation.lng,
@@ -227,15 +488,32 @@ async function handleEvent(event) {
         ? `${(walkedDistance / 1000).toFixed(2)} km (${Math.round(walkedDistance)} m)`
         : `${Math.round(walkedDistance)} m`;
 
+    // 目標避難所との距離計算（到着判定: 300m以内なら無事到着）
+    const distToShelter = calculateHaversineDistance(
+      goalLat,
+      goalLng,
+      targetShelter.lat,
+      targetShelter.lng
+    );
+    const isArrived = distToShelter <= 300;
+
     const startLatStr = session.startLocation.lat.toFixed(5);
     const startLngStr = session.startLocation.lng.toFixed(5);
     const goalLatStr = goalLat.toFixed(5);
     const goalLngStr = goalLng.toFixed(5);
 
-    // 完了メッセージ（テキスト）
+    // 到着成功メッセージ or 途中終了メッセージ
+    let arrivalMessage = "";
+    if (isArrived) {
+      arrivalMessage = `🎉 おめでとうございます！目標避難所に無事到着しました！\n`;
+    } else {
+      arrivalMessage = `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n`;
+    }
+
     const resultMessage =
-      `🎉 避難訓練が完了しました！\n` +
+      `${arrivalMessage}` +
       `━━━━━━━━━━━━━━\n` +
+      `🏢 目標避難所: ${targetShelter.name}\n` +
       `⏱️ 避難時間: ${timeText}\n` +
       `📏 移動距離: ${distanceText}\n` +
       `━━━━━━━━━━━━━━\n` +
