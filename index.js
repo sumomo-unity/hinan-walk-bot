@@ -1,10 +1,11 @@
 const express = require("express");
 const line = require("@line/bot-sdk");
 
-// LINE Bot 設定
+// LINE Bot & Google Maps 設定
 const config = {
   channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN || "",
-  channelSecret: process.env.CHANNEL_SECRET || ""
+  channelSecret: process.env.CHANNEL_SECRET || "",
+  googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || ""
 };
 
 const client = new line.messagingApi.MessagingApiClient({
@@ -74,7 +75,7 @@ const KUMAGAYA_SHELTERS = [
 const userSessions = new Map();
 
 /**
- * Haversine（ハバーサイン）式による2地点間の距離計算（メートル単位）
+ * Haversine（ハバーサイン）式による2地点間の直線距離計算（メートル単位）
  */
 function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000; // 地球の半径 (メートル)
@@ -92,6 +93,103 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c; // メートル
+}
+
+/**
+ * Google Maps Routes API (徒歩ルート) で距離・所要時間を取得
+ * ※ APIキー未設定時やエラー時は直線距離と推定歩行速度（分速80m）に自動フォールバック
+ */
+async function getWalkingRoute(originLat, originLng, destLat, destLng) {
+  const apiKey = config.googleMapsApiKey;
+
+  if (apiKey) {
+    try {
+      const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
+          "X-Goog-Maps-Solution-ID": "gmp_git_agentskills_v1"
+        },
+        body: JSON.stringify({
+          origin: {
+            location: {
+              latLng: {
+                latitude: originLat,
+                longitude: originLng
+              }
+            }
+          },
+          destination: {
+            location: {
+              latLng: {
+                latitude: destLat,
+                longitude: destLng
+              }
+            }
+          },
+          travelMode: "WALK"
+        })
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.routes && data.routes.length > 0) {
+          const route = data.routes[0];
+          const distanceMeters = route.distanceMeters || 0;
+          const durationSeconds = route.duration
+            ? parseInt(route.duration.replace("s", ""), 10)
+            : Math.round(distanceMeters / 1.33);
+
+          return {
+            distanceMeters,
+            durationSeconds,
+            isRouteApi: true
+          };
+        }
+      } else {
+        console.warn("Routes API error status:", response.status, await response.text());
+      }
+    } catch (err) {
+      console.warn("Routes API fetch failed, falling back to Haversine:", err.message);
+    }
+  }
+
+  // フォールバック: 直線距離 × 都市部平均迂回係数(1.25) & 一般的な歩行速度(分速80m)
+  const straightDist = calculateHaversineDistance(originLat, originLng, destLat, destLng);
+  const estimatedWalkingDist = Math.round(straightDist * 1.25);
+  const estimatedSeconds = Math.round((estimatedWalkingDist / 80) * 60);
+
+  return {
+    distanceMeters: estimatedWalkingDist,
+    durationSeconds: estimatedSeconds,
+    straightDistance: straightDist,
+    isRouteApi: false
+  };
+}
+
+/**
+ * メートル表記を km または m に整形
+ */
+function formatDistance(meters) {
+  if (meters >= 1000) {
+    return `${(meters / 1000).toFixed(2)} km (${Math.round(meters)} m)`;
+  }
+  return `${Math.round(meters)} m`;
+}
+
+/**
+ * 秒数を「〇分」または「〇時間〇分」に整形
+ */
+function formatDuration(seconds) {
+  const mins = Math.max(1, Math.round(seconds / 60));
+  if (mins >= 60) {
+    const hours = Math.floor(mins / 60);
+    const remainMins = mins % 60;
+    return remainMins > 0 ? `${hours}時間${remainMins}分` : `${hours}時間`;
+  }
+  return `${mins}分`;
 }
 
 /**
@@ -410,18 +508,13 @@ async function handleEvent(event) {
     if (!session.startLocation || !session.startTime) {
       const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
 
-      // 避難所までの初期直線距離
-      const initialDist = calculateHaversineDistance(
-        lat,
-        lng,
-        targetShelter.lat,
-        targetShelter.lng
-      );
+      // Google Maps Routes API で徒歩ルート距離・予想時間を取得
+      const routeInfo = await getWalkingRoute(lat, lng, targetShelter.lat, targetShelter.lng);
 
       session.status = "WALKING";
       session.startLocation = { lat, lng };
       session.startTime = Date.now();
-      session.initialDistance = initialDist;
+      session.initialDistance = routeInfo.distanceMeters;
       userSessions.set(userId, session);
 
       const startTimeStr = new Date(session.startTime).toLocaleTimeString("ja-JP", {
@@ -429,11 +522,6 @@ async function handleEvent(event) {
         minute: "2-digit",
         second: "2-digit"
       });
-
-      const initialDistText =
-        initialDist >= 1000
-          ? `${(initialDist / 1000).toFixed(2)} km (${Math.round(initialDist)} m)`
-          : `${Math.round(initialDist)} m`;
 
       return client.replyMessage({
         replyToken: event.replyToken,
@@ -445,7 +533,8 @@ async function handleEvent(event) {
               `🎯 目標避難所: ${targetShelter.name}\n` +
               `⏰ 開始時刻: ${startTimeStr}\n` +
               `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n` +
-              `📏 避難所までの直線距離: 約 ${initialDistText}\n\n` +
+              `🚶 徒歩ルート距離: 約 ${formatDistance(routeInfo.distanceMeters)}\n` +
+              `⏱️ 徒歩予想時間: 約 ${formatDuration(routeInfo.durationSeconds)}\n\n` +
               `周囲の安全に注意して避難所へ向かってください。\n\n` +
               `到着時、または途中でやめたくなった場合も「ゴール」と送信するか、現在地（位置情報）を送信してください。`
           }
@@ -453,46 +542,37 @@ async function handleEvent(event) {
       });
     }
 
-    // ② ゴール地点の登録 ＆ 時間・距離の計算
+    // ② ゴール地点の登録 ＆ 時間・徒歩距離の計算
     const endTime = session.goalTime || Date.now();
     const goalLat = lat;
     const goalLng = lng;
     const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
 
-    // 時間計算（差分）
+    // 時間計算（実際の経過時間）
     const elapsedSeconds = Math.max(1, Math.floor((endTime - session.startTime) / 1000));
     const minutes = Math.floor(elapsedSeconds / 60);
     const seconds = elapsedSeconds % 60;
     const timeText = minutes > 0 ? `${minutes}分 ${seconds}秒` : `${seconds}秒`;
 
-    // 距離計算（Haversine式: スタート地点〜ゴール地点の移動距離）
-    const walkedDistance = calculateHaversineDistance(
+    // 徒歩距離計算（スタート〜ゴール間の実際の移動ルート距離）
+    const walkedRoute = await getWalkingRoute(
       session.startLocation.lat,
       session.startLocation.lng,
       goalLat,
       goalLng
     );
-    const distanceText =
-      walkedDistance >= 1000
-        ? `${(walkedDistance / 1000).toFixed(2)} km (${Math.round(walkedDistance)} m)`
-        : `${Math.round(walkedDistance)} m`;
 
-    // 目標避難所までの残りの距離を計算
-    const distToShelter = calculateHaversineDistance(
+    // 目標避難所までの残りの徒歩距離を計算
+    const remainRoute = await getWalkingRoute(
       goalLat,
       goalLng,
       targetShelter.lat,
       targetShelter.lng
     );
-    const isArrived = distToShelter <= 300; // 300m以内なら無事到着と判定
+    const isArrived = remainRoute.distanceMeters <= 300; // 300m以内なら無事到着と判定
 
-    // 初期距離（スタート地点〜目標避難所）
-    const initialDist = session.initialDistance || calculateHaversineDistance(
-      session.startLocation.lat,
-      session.startLocation.lng,
-      targetShelter.lat,
-      targetShelter.lng
-    );
+    const initialDist = session.initialDistance || 1000;
+    const remainDist = remainRoute.distanceMeters;
 
     const startLatStr = session.startLocation.lat.toFixed(5);
     const startLngStr = session.startLocation.lng.toFixed(5);
@@ -503,26 +583,26 @@ async function handleEvent(event) {
     let arrivalMessage = "";
     if (isArrived) {
       arrivalMessage = `🎉 おめでとうございます！目標避難所に無事到着しました！\n`;
-    } else if (initialDist > 0 && distToShelter < initialDist * 0.2) {
+    } else if (initialDist > 0 && remainDist < initialDist * 0.2) {
       // 残り距離が5分の1を切っている場合
       arrivalMessage =
-        `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n` +
+        `🏁 避難訓練を完了しました！（目標避難所まで徒歩残り 約 ${formatDistance(remainDist)}）\n` +
         `よく頑張ったね、自分を褒めよう\n`;
-    } else if (initialDist > 0 && distToShelter < initialDist * 0.5) {
+    } else if (initialDist > 0 && remainDist < initialDist * 0.5) {
       // 残り距離が半分より短い時
       arrivalMessage =
-        `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n` +
+        `🏁 避難訓練を完了しました！（目標避難所まで徒歩残り 約 ${formatDistance(remainDist)}）\n` +
         `もう少しで、目標達成だよ\n`;
     } else {
-      arrivalMessage = `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n`;
+      arrivalMessage = `🏁 避難訓練を完了しました！（目標避難所まで徒歩残り 約 ${formatDistance(remainDist)}）\n`;
     }
 
     const resultMessage =
       `${arrivalMessage}` +
       `━━━━━━━━━━━━━━\n` +
       `🏢 目標避難所: ${targetShelter.name}\n` +
-      `⏱️ 避難時間: ${timeText}\n` +
-      `📏 移動距離: ${distanceText}\n` +
+      `⏱️ 実際の避難時間: ${timeText}\n` +
+      `🚶 実際の移動距離: ${formatDistance(walkedRoute.distanceMeters)}\n` +
       `━━━━━━━━━━━━━━\n` +
       `📍 スタート: 北緯 ${startLatStr}, 東経 ${startLngStr}\n` +
       `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
