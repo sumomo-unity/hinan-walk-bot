@@ -70,7 +70,7 @@ const KUMAGAYA_SHELTERS = [
 ];
 
 // ユーザーごとのセッション管理（メモリ保持）
-// userId => { status, targetShelter, startLocation, startTime, goalLocation, goalTime }
+// userId => { status, targetShelter, startLocation, startTime, initialDistance, goalLocation, goalTime }
 const userSessions = new Map();
 
 /**
@@ -257,6 +257,7 @@ async function handleEvent(event) {
           targetShelter: shelter,
           startLocation: null,
           startTime: null,
+          initialDistance: 0,
           goalLocation: null,
           goalTime: null
         };
@@ -418,11 +419,20 @@ async function handleEvent(event) {
     if (!session || !session.startLocation || !session.startTime) {
       const targetShelter = (session && session.targetShelter) || KUMAGAYA_SHELTERS[0];
 
+      // 避難所までの初期直線距離
+      const initialDist = calculateHaversineDistance(
+        lat,
+        lng,
+        targetShelter.lat,
+        targetShelter.lng
+      );
+
       session = {
         status: "WALKING",
         targetShelter: targetShelter,
         startLocation: { lat, lng },
         startTime: Date.now(),
+        initialDistance: initialDist,
         goalLocation: null,
         goalTime: null
       };
@@ -434,13 +444,6 @@ async function handleEvent(event) {
         second: "2-digit"
       });
 
-      // 避難所までの初期直線距離
-      const initialDist = calculateHaversineDistance(
-        lat,
-        lng,
-        targetShelter.lat,
-        targetShelter.lng
-      );
       const initialDistText =
         initialDist >= 1000
           ? `${(initialDist / 1000).toFixed(2)} km (${Math.round(initialDist)} m)`
@@ -488,24 +491,42 @@ async function handleEvent(event) {
         ? `${(walkedDistance / 1000).toFixed(2)} km (${Math.round(walkedDistance)} m)`
         : `${Math.round(walkedDistance)} m`;
 
-    // 目標避難所との距離計算（到着判定: 300m以内なら無事到着）
+    // 目標避難所までの残りの距離を計算
     const distToShelter = calculateHaversineDistance(
       goalLat,
       goalLng,
       targetShelter.lat,
       targetShelter.lng
     );
-    const isArrived = distToShelter <= 200;
+    const isArrived = distToShelter <= 300; // 300m以内なら無事到着と判定
+
+    // 初期距離（スタート地点〜目標避難所）
+    const initialDist = session.initialDistance || calculateHaversineDistance(
+      session.startLocation.lat,
+      session.startLocation.lng,
+      targetShelter.lat,
+      targetShelter.lng
+    );
 
     const startLatStr = session.startLocation.lat.toFixed(5);
     const startLngStr = session.startLocation.lng.toFixed(5);
     const goalLatStr = goalLat.toFixed(5);
     const goalLngStr = goalLng.toFixed(5);
 
-    // 到着成功メッセージ or 途中終了メッセージ
+    // 到着判定および進捗メッセージの生成
     let arrivalMessage = "";
     if (isArrived) {
       arrivalMessage = `🎉 おめでとうございます！目標避難所に無事到着しました！\n`;
+    } else if (initialDist > 0 && distToShelter < initialDist * 0.2) {
+      // 残り距離が5分の1を切っている場合
+      arrivalMessage =
+        `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n` +
+        `よく頑張ったね、自分を褒めよう\n`;
+    } else if (initialDist > 0 && distToShelter < initialDist * 0.5) {
+      // 残り距離が半分より短い時
+      arrivalMessage =
+        `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n` +
+        `もう少しで、目標達成だよ\n`;
     } else {
       arrivalMessage = `🏁 避難訓練を完了しました！（目標避難所まで残り 約 ${Math.round(distToShelter)} m）\n`;
     }
