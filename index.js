@@ -495,7 +495,7 @@ async function handleEvent(event) {
       targetShelter.lat,
       targetShelter.lng
     );
-    const isArrived = distToShelter <= 300;
+    const isArrived = distToShelter <= 200;
 
     const startLatStr = session.startLocation.lat.toFixed(5);
     const startLngStr = session.startLocation.lng.toFixed(5);
