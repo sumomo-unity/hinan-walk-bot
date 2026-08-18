@@ -168,6 +168,33 @@ function formatJapanDate(timestamp) {
   });
 }
 
+// ── 3.7. 「使い方」テキスト生成関数（NEW） ──
+/**
+ * 「使い方」のヘルプテキストを生成
+ * @returns {string} ヘルプメッセージ
+ */
+function getHelpMessage() {
+  return (
+    "📖 【避難ウォークBot の使い方】\n\n" +
+    "各コマンドを入力した際の動作説明です：\n\n" +
+    "🔹「スタート」\n" +
+    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します。\n\n" +
+    "🔹「スタート」（訓練中に送信）\n" +
+    "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
+    "🔹「ゴール」\n" +
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が計算されます。\n\n" +
+    "🔹「リセット」\n" +
+    "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
+    "🔹「履歴」\n" +
+    "過去の避難訓練の記録一覧（直近5件）を表示します。\n\n" +
+    "🔹「使い方」\n" +
+    "この説明テキストを表示します。\n\n" +
+    "──────────────────\n" +
+    "※ 訓練中は「スタート」「リセット」「ゴール」「使い方」のみ受け付けます。\n" +
+    "※ 終了後は「スタート」「使い方」「履歴」を入力できます。"
+  );
+}
+
 // ── 4. セッション管理（Firestore / メモリ両対応） ──
 async function getSession(userId) {
   if (db) {
@@ -709,7 +736,20 @@ async function handleEvent(event) {
           });
         }
 
-        // ③ スタート中は「スタート」「リセット」「ゴール」以外のテキストはすべて無視
+        // ③ 「使い方」（訓練中に追加）
+        if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
+          return client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text: getHelpMessage()
+              }
+            ]
+          });
+        }
+
+        // ④ スタート中は「スタート」「リセット」「ゴール」「使い方」以外のテキストはすべて無視
         return Promise.resolve(null);
       }
 
@@ -721,24 +761,7 @@ async function handleEvent(event) {
           messages: [
             {
               type: "text",
-              text:
-                "📖 【避難ウォークBot の使い方】\n\n" +
-                "各コマンドを入力した際の動作説明です：\n\n" +
-                "🔹「スタート」\n" +
-                "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します。\n\n" +
-                "🔹「スタート」（訓練中に送信）\n" +
-                "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
-                "🔹「ゴール」\n" +
-                "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が計算されます。\n\n" +
-                "🔹「リセット」\n" +
-                "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
-                "🔹「履歴」\n" +
-                "過去の避難訓練の記録一覧（直近5件）を表示します。\n\n" +
-                "🔹「使い方」\n" +
-                "この説明テキストを表示します（ゴール後・未開始時のみ有効）。\n\n" +
-                "──────────────────\n" +
-                "※ 訓練中は「スタート」「リセット」「ゴール」以外のメッセージは無視されます。\n" +
-                "※ 終了後は「スタート」「使い方」「履歴」以外のメッセージは無視されます。"
+              text: getHelpMessage()
             }
           ]
         });
@@ -764,7 +787,7 @@ async function handleEvent(event) {
           // startTime がタイムスタンプ（数値）の場合と ISO 文字列の場合の両方に対応
           const startTimestamp = typeof h.startTime === "number" ? h.startTime : new Date(h.startTime).getTime();
           const dateStr = formatJapanDate(startTimestamp);
-          
+
           const mins = Math.floor((h.elapsedSeconds || 0) / 60);
           const secs = (h.elapsedSeconds || 0) % 60;
           const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
@@ -965,12 +988,17 @@ async function handleEvent(event) {
       // セッション削除
       await deleteSession(userId);
 
+      // ✅ ゴール後のメッセージに「使い方」テキストを自動追加
       return client.replyMessage({
         replyToken: event.replyToken,
         messages: [
           {
             type: "text",
             text: resultMessage
+          },
+          {
+            type: "text",
+            text: getHelpMessage()
           }
         ]
       });
