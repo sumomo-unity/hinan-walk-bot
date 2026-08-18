@@ -3,9 +3,10 @@ const line = require("@line/bot-sdk");
 
 // ※ トークン漏洩防止のため環境変数の使用を推奨しますが、テスト用として直接記述する場合はここを書き換えてください
 const config = {
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN || "4IIHHtTvmdNSatIjkSYMLkPKgMKAuBy4to4X8zbl3B/g8GO8TT/wkhbL+RHa8rd+wmo/Bh79KIKcjRaYOPBbwKHxvG6IZdEzSPz0rCMj89DIHJQW6uuxFcZncTFx7ZlNEkLiLeMuXnFaC2qtjiyNfQdB04t89/1O/w1cDnyilFU=",
-  channelSecret: process.env.CHANNEL_SECRET || "273980dcd9dbbee66b00474d14c934a8"
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.CHANNEL_SECRET
 };
+
 
 const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
