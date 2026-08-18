@@ -182,7 +182,7 @@ function getHelpMessage() {
     "🔹「スタート」（訓練中に送信）\n" +
     "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が計算されます。\n\n" +
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が表示されます。\n\n" +
     "🔹「リセット」\n" +
     "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
     "🔹「履歴」\n" +
@@ -316,18 +316,21 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// ✅ 【修正①】 Google Maps Routes API v2 の認証ヘッダーを正しく設定
 async function getWalkingRoute(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
 
   if (apiKey) {
     try {
-      const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+      // URLパラメータとしてAPIキーを渡す
+      const url = new URL("https://routes.googleapis.com/directions/v2:computeRoutes");
+      url.searchParams.append("key", apiKey);
+
+      const response = await fetch(url.toString(), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Goog-Api-Key": apiKey,
-          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
-          "X-Goog-Maps-Solution-ID": "gmp_git_agentskills_v1"
+          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters"
         },
         body: JSON.stringify({
           origin: {
@@ -366,10 +369,21 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
             notice: ""
           };
         }
+      } else {
+        // ✅ 【修正②】 エラーレスポンスの詳細をログ出力
+        const errorText = await response.text();
+        console.warn(`Routes API HTTP ${response.status}:`, errorText);
       }
     } catch (err) {
-      console.warn("Routes API fetch failed, falling back to Haversine:", err.message);
+      // ✅ 【修正②】 API キーの状態とエラーの詳細をログ出力
+      console.warn("Routes API fetch failed:", {
+        message: err.message,
+        apiKey: config.googleMapsApiKey ? "✓ set" : "✗ not set",
+        hasApiKey: !!config.googleMapsApiKey
+      });
     }
+  } else {
+    console.warn("⚠️ Google Maps API Key が設定されていません。直線距離で計算します。");
   }
 
   const straightDist = calculateHaversineDistance(originLat, originLng, destLat, destLng);
@@ -405,7 +419,8 @@ function formatDuration(seconds) {
 // ── 9. Flex Message カルーセル生成 ──
 function createShelterFlex(shelters) {
   const bubbles = shelters.map((shelter) => {
-    const mapUrl = `https://www.google.com/maps/search/?api=1&query=${shelter.lat},${shelter.lng}`;
+    // ✅ 【修正③】 Google Maps を起動する URL に変更（検索ではなく直接地図表示）
+    const mapUrl = `https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`;
     const tagColor = shelter.tagColor || "#2980b9";
 
     return {
