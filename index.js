@@ -191,7 +191,7 @@ function getHelpMessage() {
     "この説明テキストを表示します。\n\n" +
     "──────────────────\n" +
     "※ 訓練中は「スタート」「リセット」「ゴール」「使い方」のみ受け付けます。\n" +
-    "※ 終了後は「スタート」「使い方」「履歴」を入力できます。"
+    "※ 終了後は「スタート」「使い方」「履歴」を入力できます."
   );
 }
 
@@ -600,8 +600,8 @@ app.get("/export/csv", async (req, res) => {
       l.drillId || "",
       l.userId || "",
       l.shelterId || "",
-      `"${(l.shelterName || "").replace(/"/g, '""')}"`,
-      `"${(l.shelterCity || "").replace(/"/g, '""')}"`,
+      `"${(l.shelterName || "").replace(/"/g, '""') }"`,
+      `"${(l.shelterCity || "").replace(/"/g, '""') }"`,
       l.startTime || "",
       l.endTime || "",
       l.elapsedSeconds || 0,
@@ -626,6 +626,59 @@ app.get("/export/csv", async (req, res) => {
   } catch (err) {
     console.error("CSV Export error:", err);
     return res.status(500).send("Failed to export CSV: " + err.message);
+  }
+});
+
+// ── 12. 危険箇所QR（hazard?id=xxx）エンドポイント ──
+app.get("/hazard", async (req, res) => {
+  try {
+    const hazardId = req.query.id;
+
+    if (!hazardId) {
+      return res.status(400).send("hazard id is missing");
+    }
+
+    // Firestore が使えるか確認
+    if (!db) {
+      return res.status(500).send("Firestore is not initialized");
+    }
+
+    // Firestore から hazardId の危険情報を取得
+    const doc = await db.collection("hazards").doc(hazardId).get();
+
+    if (!doc.exists) {
+      return res.status(404).send(`hazard '${hazardId}' not found`);
+    }
+
+    const hazard = doc.data();
+
+    // LINE に危険情報を送る（push）
+    // ※ hazard.notifyUserId が無い場合は、固定の管理者IDを使うか、後で改善する
+    const targetUserId = hazard.notifyUserId || hazard.defaultUserId;
+
+    if (!targetUserId) {
+      console.warn("No target userId found for hazard:", hazardId);
+    }
+
+    await client.pushMessage({
+      to: targetUserId,
+      messages: [
+        {
+          type: "text",
+          text:
+            `⚠️【危険箇所情報】\n\n` +
+            `📌 種別: ${hazard.type || "危険箇所"}\n` +
+            `📍 場所: ${hazard.title}\n\n` +
+            `${hazard.description}\n\n` +
+            `🌐 ARで確認する:\n${hazard.arUrl || "ARページ未設定"}`
+        }
+      ]
+    });
+
+    return res.status(200).send("hazard info sent");
+  } catch (err) {
+    console.error("Hazard endpoint error:", err);
+    return res.status(500).send("hazard endpoint failed: " + err.message);
   }
 });
 
@@ -958,7 +1011,7 @@ async function handleEvent(event) {
         `📍 スタート: 北緯 ${startLatStr}, 東経 ${startLngStr}\n` +
         `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
         `避難訓練お疲れ様でした！\n` +
-        `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
+        `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください.`;
 
       // 研究用ログを Firestore / メモリに保存
       // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存し、ミリ秒も併記する
