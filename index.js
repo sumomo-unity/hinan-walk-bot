@@ -178,11 +178,11 @@ function getHelpMessage() {
     "📖 【避難ウォークBot の使い方】\n\n" +
     "各コマンドを入力した際の動作説明です：\n\n" +
     "🔹「スタート」\n" +
-    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します。\n\n" +
+    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します[...]\n" +
     "🔹「スタート」（訓練中に送信）\n" +
     "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が表示されます。\n\n" +
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判�[...]\n" +
     "🔹「リセット」\n" +
     "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
     "🔹「履歴」\n" +
@@ -961,31 +961,17 @@ async function handleEvent(event) {
         `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
 
       // 研究用ログを Firestore / メモリに保存
-      // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存
+      // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存し、ミリ秒も併記する
       const drillLog = {
         drillId: `drill_${Date.now()}_${userId.slice(-6)}`,
         userId: userId,
         shelterId: targetShelter.id,
         shelterName: targetShelter.name,
         shelterCity: targetShelter.city || "熊谷市",
-        startTime: new Date(session.startTime).toLocaleString("ja-JP", {
-          timeZone: "Asia/Tokyo",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        }),
-        endTime: new Date(endTime).toLocaleString("ja-JP", {
-          timeZone: "Asia/Tokyo",
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit"
-        }),
+        startTime: toJapanISOString(session.startTime),
+        startTimeMs: session.startTime,
+        endTime: toJapanISOString(endTime),
+        endTimeMs: endTime,
         elapsedSeconds: elapsedSeconds,
         startLat: session.startLocation.lat,
         startLng: session.startLocation.lng,
