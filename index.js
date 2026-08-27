@@ -1,6 +1,10 @@
 const express = require("express");
 const line = require("@line/bot-sdk");
-const admin = require("firebase-admin");
+const { Firestore, FieldValue } = require("@google-cloud/firestore");
+
+// Cloud Run が自動でサービスアカウント認証する（鍵不要）
+const firestore = new Firestore();
+const db = firestore;
 
 // ── 1. 各種設定 & 認証情報 ──
 const config = {
@@ -13,31 +17,6 @@ const config = {
 const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
 });
-
-// ── 2. Cloud Firestore 初期化（環境変数またはフォールバック） ──
-let db = null;
-try {
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    const raw = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
-    const serviceAccount = JSON.parse(
-      raw.startsWith("{") ? raw : Buffer.from(raw, "base64").toString("utf8")
-    );
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    db = admin.firestore();
-    console.log("🔥 [Firestore] Firebase Admin SDK で接続しました。");
-  } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-    admin.initializeApp();
-    db = admin.firestore();
-    console.log("🔥 [Firestore] Google ADC で接続しました。");
-  } else {
-    console.log("ℹ️ [Firestore] 認証情報未設定のため、メモリ保持モード（Map）で動作します。");
-  }
-} catch (err) {
-  console.warn("⚠️ [Firestore] 初期化失敗。メモリ保持モードで動作します:", err.message);
-  db = null;
-}
 
 // ── 3. 熊谷市 避難所初期マスタデータ ──
 const KUMAGAYA_SHELTERS = [
@@ -113,20 +92,11 @@ const KUMAGAYA_SHELTERS = [
 const memorySessions = new Map();
 const memoryLogs = [];
 
-// ── 3.5. タイムゾーン対応関数（NEW） ──
-/**
- * 現在時刻を日本標準時（JST / Asia/Tokyo）で取得
- * @returns {number} ミリ秒単位のタイムスタンプ
- */
+// ── 3.5. タイムゾーン対応関数 ──
 function getJapanNowTimestamp() {
   return Date.now();
 }
 
-/**
- * タイムスタンプを日本時間の ISO 8601 文字列に変換
- * @param {number} timestamp - ミリ秒単位のタイムスタンプ
- * @returns {string} ISO 8601 形式の日本時間文字列
- */
 function toJapanISOString(timestamp) {
   return new Date(timestamp).toLocaleString("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -139,11 +109,6 @@ function toJapanISOString(timestamp) {
   }).replace(/(\d+)\/(\d+)\/(\d+)\s(\d+):(\d+):(\d+)/, "$3-$1-$2T$4:$5:$6+09:00");
 }
 
-/**
- * タイムスタンプを日本時間のフォーマット済み文字列に変換
- * @param {number} timestamp - ミリ秒単位のタイムスタンプ
- * @returns {string} 日本時間の表示用文字列
- */
 function formatJapanTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -153,11 +118,6 @@ function formatJapanTime(timestamp) {
   });
 }
 
-/**
- * タイムスタンプを日本時間の日付情報に変換
- * @param {number} timestamp - ミリ秒単位のタイムスタンプ
- * @returns {string} 日本時間の日付表示用文字列
- */
 function formatJapanDate(timestamp) {
   return new Date(timestamp).toLocaleDateString("ja-JP", {
     timeZone: "Asia/Tokyo",
@@ -168,11 +128,7 @@ function formatJapanDate(timestamp) {
   });
 }
 
-// ── 3.7. 「使い方」テキスト生成関数（NEW） ──
-/**
- * 「使い方」のヘルプテキストを生成
- * @returns {string} ヘルプメッセージ
- */
+// ── 3.7. 「使い方」テキスト生成関数 ──
 function getHelpMessage() {
   return (
     "📖 【避難ウォークBot の使い方】\n\n" +
@@ -182,90 +138,69 @@ function getHelpMessage() {
     "🔹「スタート」（訓練中に送信）\n" +
     "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判�[...]\n" +
-    "🔹「リセット」\n" +
-    "訓練を途中で中止し、記録を初期化します（訓練中のみ有効）。\n\n" +
-    "🔹「履歴」\n" +
-    "過去の避難訓練の記録一覧（直近5件）を表示します。\n\n" +
-    "🔹「使い方」\n" +
-    "この説明テキストを表示します。\n\n" +
-    "──────────────────\n" +
-    "※ 訓練中は「スタート」「リセット」「ゴール」「使い方」のみ受け付けます。\n" +
-    "※ 終了後は「スタート」「使い方」「履歴」を入力できます."
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定[...]"
   );
 }
 
 // ── 4. セッション管理（Firestore / メモリ両対応） ──
 async function getSession(userId) {
-  if (db) {
-    try {
-      const doc = await db.collection("user_sessions").doc(userId).get();
-      if (doc.exists) return doc.data();
-    } catch (e) {
-      console.error("Firestore getSession error:", e.message);
-    }
+  try {
+    const doc = await db.collection("user_sessions").doc(userId).get();
+    if (doc.exists) return doc.data();
+  } catch (e) {
+    console.error("Firestore getSession error:", e.message);
   }
   return memorySessions.get(userId) || null;
 }
 
 async function saveSession(userId, sessionData) {
-  if (db) {
-    try {
-      await db.collection("user_sessions").doc(userId).set({
-        ...sessionData,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      return;
-    } catch (e) {
-      console.error("Firestore saveSession error:", e.message);
-    }
+  try {
+    await db.collection("user_sessions").doc(userId).set({
+      ...sessionData,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+  } catch (e) {
+    console.error("Firestore saveSession error:", e.message);
+    memorySessions.set(userId, sessionData);
   }
-  memorySessions.set(userId, sessionData);
 }
 
 async function deleteSession(userId) {
-  if (db) {
-    try {
-      await db.collection("user_sessions").doc(userId).delete();
-    } catch (e) {
-      console.error("Firestore deleteSession error:", e.message);
-    }
+  try {
+    await db.collection("user_sessions").doc(userId).delete();
+  } catch (e) {
+    console.error("Firestore deleteSession error:", e.message);
   }
   memorySessions.delete(userId);
 }
 
-// ── 5. ログ保存 & 履歴取得（研究用データ管理） ──
+// ── 5. ログ保存 & 履歴取得 ──
 async function saveEvacuationLog(logData) {
-  if (db) {
-    try {
-      await db.collection("evacuation_logs").add({
-        ...logData,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      });
-      return;
-    } catch (e) {
-      console.error("Firestore saveEvacuationLog error:", e.message);
-    }
+  try {
+    await db.collection("evacuation_logs").add({
+      ...logData,
+      createdAt: FieldValue.serverTimestamp()
+    });
+  } catch (e) {
+    console.error("Firestore saveEvacuationLog error:", e.message);
+    memoryLogs.push({ ...logData, createdAt: new Date() });
   }
-  memoryLogs.push({ ...logData, createdAt: new Date() });
 }
 
 async function getUserHistory(userId, limitCount = 5) {
-  if (db) {
-    try {
-      const snapshot = await db
-        .collection("evacuation_logs")
-        .where("userId", "==", userId)
-        .orderBy("startTime", "desc")
-        .limit(limitCount)
-        .get();
+  try {
+    const snapshot = await db
+      .collection("evacuation_logs")
+      .where("userId", "==", userId)
+      .orderBy("startTime", "desc")
+      .limit(limitCount)
+      .get();
 
-      if (!snapshot.empty) {
-        return snapshot.docs.map((d) => d.data());
-      }
-    } catch (e) {
-      console.error("Firestore getUserHistory error:", e.message);
+    if (!snapshot.empty) {
+      return snapshot.docs.map((d) => d.data());
     }
+  } catch (e) {
+    console.error("Firestore getUserHistory error:", e.message);
   }
 
   return memoryLogs
@@ -274,22 +209,20 @@ async function getUserHistory(userId, limitCount = 5) {
     .slice(0, limitCount);
 }
 
-// ── 6. 避難所マスタ取得（Firestore / ローカルフォールバック） ──
+// ── 6. 避難所マスタ取得 ──
 async function getShelterList() {
-  if (db) {
-    try {
-      const snapshot = await db.collection("shelters").get();
-      if (!snapshot.empty) {
-        return snapshot.docs.map((doc) => doc.data());
-      }
-    } catch (e) {
-      console.warn("Firestore shelters get failed, using fallback:", e.message);
+  try {
+    const snapshot = await db.collection("shelters").get();
+    if (!snapshot.empty) {
+      return snapshot.docs.map((doc) => doc.data());
     }
+  } catch (e) {
+    console.warn("Firestore shelters get failed, using fallback:", e.message);
   }
   return KUMAGAYA_SHELTERS;
 }
 
-// ── 7. 位置情報ガード（日本国内座標 & 数値検証） ──
+// ── 7. 位置情報ガード ──
 function isValidJapanCoordinate(lat, lng) {
   if (typeof lat !== "number" || typeof lng !== "number" || isNaN(lat) || isNaN(lng)) {
     return false;
@@ -316,13 +249,12 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// ✅ 【修正①】 Google Maps Routes API v2 の認証ヘッダーを正しく設定
+// Google Maps Routes API v2
 async function getWalkingRoute(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
 
   if (apiKey) {
     try {
-      // URLパラメータとしてAPIキーを渡す
       const url = new URL("https://routes.googleapis.com/directions/v2:computeRoutes");
       url.searchParams.append("key", apiKey);
 
@@ -370,12 +302,10 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
           };
         }
       } else {
-        // ✅ 【修正②】 エラーレスポンスの詳細をログ出力
         const errorText = await response.text();
         console.warn(`Routes API HTTP ${response.status}:`, errorText);
       }
     } catch (err) {
-      // ✅ 【修正②】 API キーの状態とエラーの詳細をログ出力
       console.warn("Routes API fetch failed:", {
         message: err.message,
         apiKey: config.googleMapsApiKey ? "✓ set" : "✗ not set",
@@ -419,7 +349,6 @@ function formatDuration(seconds) {
 // ── 9. Flex Message カルーセル生成 ──
 function createShelterFlex(shelters) {
   const bubbles = shelters.map((shelter) => {
-    // ✅ 【修正③】 Google Maps を起動する URL に変更（検索ではなく直接地図表示）
     const mapUrl = `https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`;
     const tagColor = shelter.tagColor || "#2980b9";
 
@@ -567,16 +496,12 @@ app.get("/export/csv", async (req, res) => {
 
   try {
     let logs = [];
-    if (db) {
-      const snapshot = await db.collection("evacuation_logs").orderBy("startTime", "desc").get();
-      logs = snapshot.docs.map((d) => d.data());
-    } else {
-      logs = [...memoryLogs].sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
-    }
+    const snapshot = await db.collection("evacuation_logs").orderBy("startTime", "desc").get();
+    logs = snapshot.docs.map((d) => d.data());
 
     const headers = [
       "drillId",
-      "userId",
+      "user",
       "shelterId",
       "shelterName",
       "shelterCity",
