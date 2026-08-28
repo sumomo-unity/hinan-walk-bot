@@ -155,6 +155,86 @@ async function getShelterList() {
   }
 }
 
+// ── 6.5. Google Maps Geocoding API（住所 → 緯度経度） ──
+async function geocodeAddress(address) {
+  const apiKey = config.googleMapsApiKey;
+  if (!apiKey) {
+    throw new Error("Google Maps API Key が設定されていません");
+  }
+
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
+
+  try {
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status !== "OK" || !data.results || data.results.length === 0) {
+      throw new Error(`住所のジオコーディングに失敗しました: ${address}`);
+    }
+
+    const location = data.results[0].geometry.location;
+    return {
+      lat: location.lat,
+      lng: location.lng
+    };
+  } catch (err) {
+    console.error("Geocoding error:", err);
+    throw err;
+  }
+}
+
+// ── 6.6. CSVインポート処理（住所 → 緯度経度自動取得） ──
+async function importSheltersFromCsv(csvText) {
+  const lines = csvText.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+
+  // 1行目はヘッダー
+  const header = lines[0].split(",");
+  const expectedHeader = ["id", "name", "address", "type", "city", "prefecture", "tagColor"];
+
+  // ヘッダー一致チェック
+  if (header.length !== expectedHeader.length ||
+      !header.every((h, i) => h === expectedHeader[i])) {
+    throw new Error("CSVヘッダーが正しくありません。正しい形式: id,name,address,type,city,prefecture,tagColor");
+  }
+
+  // 2行目以降がデータ
+  const shelters = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+
+    if (cols.length !== expectedHeader.length) {
+      console.warn(`列数が一致しません（行 ${i + 1}）:`, lines[i]);
+      continue;
+    }
+
+    const [id, name, address, type, city, prefecture, tagColor] = cols;
+
+    // 住所 → 緯度経度
+    const { lat, lng } = await geocodeAddress(address);
+
+    shelters.push({
+      id,
+      name,
+      address,
+      type,
+      city,
+      prefecture,
+      tagColor,
+      lat,
+      lng
+    });
+  }
+
+  // Firestoreへ登録
+  for (const shelter of shelters) {
+    await db.collection("shelters").doc(shelter.id).set(shelter);
+  }
+
+  return shelters.length;
+}
+
+
 // ── 7. 位置情報ガード ──
 function isValidJapanCoordinate(lat, lng) {
   if (typeof lat !== "number" || typeof lng !== "number" || isNaN(lat) || isNaN(lng)) {
