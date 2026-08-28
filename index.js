@@ -122,15 +122,22 @@ async function saveEvacuationLog(logData) {
 
 async function getUserHistory(userId, limitCount = 5) {
   try {
+    // where条件のみで取得
     const snapshot = await db
       .collection("evacuation_logs")
       .where("userId", "==", userId)
-      .orderBy("startTime", "desc")
-      .limit(limitCount)
       .get();
 
     if (!snapshot.empty) {
-      return snapshot.docs.map((d) => d.data());
+      const logs = snapshot.docs.map((d) => d.data());
+      // メモリ上で降順にソートして直近5件を抽出
+      return logs
+        .sort((a, b) => {
+          const timeA = typeof a.startTime === "number" ? a.startTime : new Date(a.startTime).getTime();
+          const timeB = typeof b.startTime === "number" ? b.startTime : new Date(b.startTime).getTime();
+          return timeB - timeA;
+        })
+        .slice(0, limitCount);
     }
   } catch (e) {
     console.error("Firestore getUserHistory error:", e.message);
