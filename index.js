@@ -835,6 +835,47 @@ async function handleEvent(event) {
       }
 
       // ── C. ゴール後 / 未開始時の場合 ──
+      // ── C-0. 訓練前（session が null）の避難所機能 ──
+      if (!session) {
+      
+        // ① 避難所一覧
+        if (text === "避難所") {
+          const shelters = await getShelterList();
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [ createShelterFlex(shelters) ]
+          });
+        }
+      
+        // ② 避難所詳細（避難所 ○○）
+        if (text.startsWith("避難所 ")) {
+          const name = text.replace("避難所 ", "").trim();
+          const shelters = await getShelterList();
+          const shelter = shelters.find(s => s.name === name);
+      
+          if (!shelter) {
+            return await client.replyMessage({
+              replyToken: event.replyToken,
+              messages: [{ type: "text", text: `「${name}」という避難所は見つかりませんでした。` }]
+            });
+          }
+      
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  `🏢 ${shelter.name}\n` +
+                  `📍 住所: ${shelter.address}\n` +
+                  `🌐 座標: ${shelter.lat}, ${shelter.lng}\n\n` +
+                  `地図: https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`
+              }
+            ]
+          });
+        }
+      }
+
       if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
         return await client.replyMessage({
           replyToken: event.replyToken,
@@ -890,42 +931,43 @@ async function handleEvent(event) {
       return null;
     }
 
-    // 3. 位置情報メッセージ処理
-    if (event.type === "message" && event.message.type === "location") {
-      if (!session) {
-        // ── 訓練前の位置情報 → 最寄り避難所検索 ──
-if (!session) {
-  const lat = event.message.latitude;
-  const lng = event.message.longitude;
-
-  const shelters = await getShelterList();
-  let nearest = null;
-  let minDist = Infinity;
-
-  shelters.forEach(s => {
-    const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
-    if (d < minDist) {
-      minDist = d;
-      nearest = s;
+   // 3. 位置情報メッセージ処理
+  if (event.type === "message" && event.message.type === "location") {
+  
+    // ── 訓練前（session が null）の最寄り避難所検索 ──
+    if (!session) {
+      const lat = event.message.latitude;
+      const lng = event.message.longitude;
+  
+      const shelters = await getShelterList();
+      let nearest = null;
+      let minDist = Infinity;
+  
+      shelters.forEach(s => {
+        const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
+        if (d < minDist) {
+          minDist = d;
+          nearest = s;
+        }
+      });
+  
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              `📍 最寄りの避難所は「${nearest.name}」です。\n` +
+              `距離: ${Math.round(minDist)}m\n` +
+              `住所: ${nearest.address}\n\n` +
+              `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
+          }
+        ]
+      });
     }
-  });
 
-  return await client.replyMessage({
-    replyToken: event.replyToken,
-    messages: [
-      {
-        type: "text",
-        text:
-          `📍 最寄りの避難所は「${nearest.name}」です。\n` +
-          `距離: ${Math.round(minDist)}m\n` +
-          `住所: ${nearest.address}\n\n` +
-          `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
-      }
-    ]
-  });
-}
 
-      }
+  　}
 
       const lat = event.message.latitude;
       const lng = event.message.longitude;
