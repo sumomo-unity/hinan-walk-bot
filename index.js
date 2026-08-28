@@ -134,11 +134,11 @@ function getHelpMessage() {
     "📖 【避難ウォークBot の使い方】\n\n" +
     "各コマンドを入力した際の動作説明です：\n\n" +
     "🔹「スタート」\n" +
-    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します[...]\\n" +
+    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します[...][...]\n" +
     "🔹「スタート」（訓練中に送信）\n" +
     "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定[...]"
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が表示されます。\n"
   );
 }
 
@@ -530,7 +530,7 @@ app.get("/export/csv", async (req, res) => {
       l.startTime || "",
       l.endTime || "",
       l.elapsedSeconds || 0,
-      ((l.elapsedSeconds || 0) / 60).toFixed(2),
+      ((l.elapsedSeconds || 0) / 60).toFixed(02),
       l.startLat || "",
       l.startLng || "",
       l.goalLat || "",
@@ -925,6 +925,7 @@ async function handleEvent(event) {
 
       const fallbackNotice = walkedRoute.notice || remainRoute.notice || "";
 
+      // まず結果メッセージを作る
       const resultMessage =
         `${arrivalMessage}` +
         `━━━━━━━━━━━━━━\n` +
@@ -937,6 +938,10 @@ async function handleEvent(event) {
         `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
         `避難訓練お疲れ様でした！\n` +
         `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
+
+      // ★ここにポイント付与ロジックを貼る★
+      // 例: ユーザーの到達状況に応じてポイントを付与する処理をここに実装してください。
+      // await awardPointsToUser(userId, { achievementLevel, elapsedSeconds, walkedDistance: walkedRoute.distanceMeters });
 
       // 研究用ログを Firestore / メモリに保存
       // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存し、ミリ秒も併記する
