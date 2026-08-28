@@ -576,7 +576,10 @@ app.get("/hazard", async (req, res) => {
     }
 
     const hazard = doc.data();
-
+    
+     // GoogleマップのURLを生成（市民投稿の緯度・経度を利用）
+    const mapUrl = `https://www.google.com/maps/search/?api=1&query=${hazard.lat},${hazard.lng}`;
+    
     // LINE に危険情報を送る（push）
     // ※ hazard.notifyUserId が無い場合は、固定の管理者IDを使うか、後で改善する
     const targetUserId = hazard.notifyUserId || hazard.defaultUserId;
@@ -595,6 +598,7 @@ app.get("/hazard", async (req, res) => {
             `📌 種別: ${hazard.type || "危険箇所"}\n` +
             `📍 場所: ${hazard.title}\n\n` +
             `${hazard.description}\n\n` +
+            `🗺️ Googleマップで場所を見る:\n${mapUrl}\n\n` +
             `🌐 ARで確認する:\n${hazard.arUrl || "ARページ未設定"}`
         }
       ]
