@@ -18,7 +18,6 @@ const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
 });
 
-
 // メモリ保持用フォールバック
 const memorySessions = new Map();
 const memoryLogs = [];
@@ -65,7 +64,7 @@ function getHelpMessage() {
     "📖 【避難ウォークBot の使い方】\n\n" +
     "各コマンドを入力した際の動作説明です：\n\n" +
     "🔹「スタート」\n" +
-    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します[...][...]\n" +
+    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します。\n\n" +
     "🔹「スタート」（訓練中に送信）\n" +
     "※訓練中に送信すると、いつでも最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
@@ -147,7 +146,6 @@ async function getShelterList() {
     if (!snapshot.empty) {
       return snapshot.docs.map((doc) => doc.data());
     }
-    // shelters コレクションが空の場合は、空配列を返す
     return [];
   } catch (e) {
     console.warn("Firestore shelters get failed:", e.message);
@@ -185,23 +183,23 @@ async function geocodeAddress(address) {
 
 // ── 6.6. CSVインポート処理（住所 → 緯度経度自動取得） ──
 async function importSheltersFromCsv(csvText) {
-  const lines = csvText.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
 
-  // 1行目はヘッダー
-  const header = lines[0].split(",");
+  if (lines.length < 2) {
+    throw new Error("CSVデータにヘッダーまたはデータが存在しません");
+  }
+
+  const header = lines[0].split(",").map(h => h.replace(/^"|"$/g, ''));
   const expectedHeader = ["id", "name", "address", "type", "city", "prefecture", "tagColor"];
 
-  // ヘッダー一致チェック
-  if (header.length !== expectedHeader.length ||
-      !header.every((h, i) => h === expectedHeader[i])) {
+  if (header.length !== expectedHeader.length || !header.every((h, i) => h === expectedHeader[i])) {
     throw new Error("CSVヘッダーが正しくありません。正しい形式: id,name,address,type,city,prefecture,tagColor");
   }
 
-  // 2行目以降がデータ
   const shelters = [];
 
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",");
+    const cols = lines[i].split(",").map(c => c.replace(/^"|"$/g, ''));
 
     if (cols.length !== expectedHeader.length) {
       console.warn(`列数が一致しません（行 ${i + 1}）:`, lines[i]);
@@ -210,7 +208,6 @@ async function importSheltersFromCsv(csvText) {
 
     const [id, name, address, type, city, prefecture, tagColor] = cols;
 
-    // 住所 → 緯度経度
     const { lat, lng } = await geocodeAddress(address);
 
     shelters.push({
@@ -226,14 +223,12 @@ async function importSheltersFromCsv(csvText) {
     });
   }
 
-  // Firestoreへ登録
   for (const shelter of shelters) {
     await db.collection("shelters").doc(shelter.id).set(shelter);
   }
 
   return shelters.length;
 }
-
 
 // ── 7. 位置情報ガード ──
 function isValidJapanCoordinate(lat, lng) {
@@ -262,7 +257,6 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-// Google Maps Routes API v2
 async function getWalkingRoute(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
 
@@ -321,7 +315,6 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
     } catch (err) {
       console.warn("Routes API fetch failed:", {
         message: err.message,
-        apiKey: config.googleMapsApiKey ? "✓ set" : "✗ not set",
         hasApiKey: !!config.googleMapsApiKey
       });
     }
@@ -361,6 +354,13 @@ function formatDuration(seconds) {
 
 // ── 9. Flex Message カルーセル生成 ──
 function createShelterFlex(shelters) {
+  if (!shelters || shelters.length === 0) {
+    return {
+      type: "text",
+      text: "現在登録されている避難所がありません。"
+    };
+  }
+
   const bubbles = shelters.map((shelter) => {
     const mapUrl = `https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`;
     const tagColor = shelter.tagColor || "#2980b9";
@@ -538,12 +538,12 @@ app.get("/export/csv", async (req, res) => {
       l.drillId || "",
       l.userId || "",
       l.shelterId || "",
-      `"${(l.shelterName || "").replace(/"/g, '""') }"`,
-      `"${(l.shelterCity || "").replace(/"/g, '""') }"`,
+      `"${(l.shelterName || "").replace(/"/g, '""')}"`,
+      `"${(l.shelterCity || "").replace(/"/g, '""')}"`,
       l.startTime || "",
       l.endTime || "",
       l.elapsedSeconds || 0,
-      ((l.elapsedSeconds || 0) / 60).toFixed(02),
+      ((l.elapsedSeconds || 0) / 60).toFixed(2), // 修正点：.toFixed(2)
       l.startLat || "",
       l.startLng || "",
       l.goalLat || "",
@@ -585,7 +585,6 @@ app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => 
   }
 });
 
-
 // ── 12. 危険箇所QR（hazard?id=xxx）エンドポイント ──
 app.get("/hazard", async (req, res) => {
   try {
@@ -595,12 +594,10 @@ app.get("/hazard", async (req, res) => {
       return res.status(400).send("hazard id is missing");
     }
 
-    // Firestore が使えるか確認
     if (!db) {
       return res.status(500).send("Firestore is not initialized");
     }
 
-    // Firestore から hazardId の危険情報を取得
     const doc = await db.collection("hazards").doc(hazardId).get();
 
     if (!doc.exists) {
@@ -608,16 +605,13 @@ app.get("/hazard", async (req, res) => {
     }
 
     const hazard = doc.data();
-    
-     // GoogleマップのURLを生成（市民投稿の緯度・経度を利用）
     const mapUrl = `https://www.google.com/maps/search/?api=1&query=${hazard.lat},${hazard.lng}`;
     
-    // LINE に危険情報を送る（push）
-    // ※ hazard.notifyUserId が無い場合は、固定の管理者IDを使うか、後で改善する
     const targetUserId = hazard.notifyUserId || hazard.defaultUserId;
 
     if (!targetUserId) {
       console.warn("No target userId found for hazard:", hazardId);
+      return res.status(400).send("Target userId for notification is not set");
     }
 
     await client.pushMessage({
@@ -671,7 +665,7 @@ async function handleEvent(event) {
           };
           await saveSession(userId, session);
 
-          return client.replyMessage({
+          return await client.replyMessage({
             replyToken: event.replyToken,
             messages: [
               {
@@ -694,12 +688,12 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // ── A. 「スタート」（訓練中・終了後どちらでも受付可能） ──
+      // ── A. 「スタート」 ──
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
         const shelters = await getShelterList();
 
-        return client.replyMessage({
+        return await client.replyMessage({
           replyToken: event.replyToken,
           messages: [
             {
@@ -719,7 +713,7 @@ async function handleEvent(event) {
         // ① 「リセット」
         if (text === "リセット" || text === "中止" || text === "キャンセル") {
           await deleteSession(userId);
-          return client.replyMessage({
+          return await client.replyMessage({
             replyToken: event.replyToken,
             messages: [
               {
@@ -733,7 +727,7 @@ async function handleEvent(event) {
         // ② 「ゴール」
         if (text === "ゴール" || text === "到着" || text === "避難完了" || text === "終了") {
           if (!session.startLocation || !session.startTime) {
-            return client.replyMessage({
+            return await client.replyMessage({
               replyToken: event.replyToken,
               messages: [
                 {
@@ -752,7 +746,7 @@ async function handleEvent(event) {
 
           const goalTimeStr = formatJapanTime(session.goalTime);
 
-          return client.replyMessage({
+          return await client.replyMessage({
             replyToken: event.replyToken,
             messages: [
               {
@@ -765,9 +759,9 @@ async function handleEvent(event) {
           });
         }
 
-        // ③ 「使い方」（訓練中に追加）
+        // ③ 「使い方」
         if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
-          return client.replyMessage({
+          return await client.replyMessage({
             replyToken: event.replyToken,
             messages: [
               {
@@ -778,14 +772,12 @@ async function handleEvent(event) {
           });
         }
 
-        // ④ スタート中は「スタート」「リセット」「ゴール」「使い方」以外のテキストはすべて無視
-        return Promise.resolve(null);
+        return null;
       }
 
       // ── C. ゴール後 / 未開始時の場合 ──
-      // ① 「使い方」
       if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
-        return client.replyMessage({
+        return await client.replyMessage({
           replyToken: event.replyToken,
           messages: [
             {
@@ -796,11 +788,10 @@ async function handleEvent(event) {
         });
       }
 
-      // ② 「履歴」
       if (text === "履歴" || text === "りれき" || text === "記録" || text === "history") {
         const history = await getUserHistory(userId, 5);
         if (!history || history.length === 0) {
-          return client.replyMessage({
+          return await client.replyMessage({
             replyToken: event.replyToken,
             messages: [
               {
@@ -813,7 +804,6 @@ async function handleEvent(event) {
 
         let historyMsg = "📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n";
         history.forEach((h, idx) => {
-          // startTime がタイムスタンプ（数値）の場合と ISO 文字列の場合の両方に対応
           const startTimestamp = typeof h.startTime === "number" ? h.startTime : new Date(h.startTime).getTime();
           const dateStr = formatJapanDate(startTimestamp);
 
@@ -832,28 +822,26 @@ async function handleEvent(event) {
         });
         historyMsg += "訓練を新しく始めるには「スタート」と送信してください。";
 
-        return client.replyMessage({
+        return await client.replyMessage({
           replyToken: event.replyToken,
           messages: [{ type: "text", text: historyMsg }]
         });
       }
 
-      // ③ ゴール後は「スタート」「使い方」「履歴」以外の入力はすべて無視
-      return Promise.resolve(null);
+      return null;
     }
 
-    // 3. 位置情報メッセージ処理（スタート登録 / ゴール登録＆計算）
+    // 3. 位置情報メッセージ処理
     if (event.type === "message" && event.message.type === "location") {
       if (!session) {
-        return Promise.resolve(null);
+        return null;
       }
 
       const lat = event.message.latitude;
       const lng = event.message.longitude;
 
-      // 位置情報の妥当性チェック
       if (!isValidJapanCoordinate(lat, lng)) {
-        return client.replyMessage({
+        return await client.replyMessage({
           replyToken: event.replyToken,
           messages: [
             {
@@ -866,66 +854,62 @@ async function handleEvent(event) {
         });
       }
 
-    // ① スタート地点の登録
-    if (!session.startLocation || !session.startTime) {
-      // セッションに避難所が入っていない場合は、Firestoreから一覧を取得して先頭を使う
-      let targetShelter = session.targetShelter;
-      if (!targetShelter) {
-        const shelters = await getShelterList();
-        targetShelter = shelters[0]; // 少なくとも1件はある前提
+      // ① スタート地点の登録
+      if (!session.startLocation || !session.startTime) {
+        let targetShelter = session.targetShelter;
+        if (!targetShelter) {
+          const shelters = await getShelterList();
+          targetShelter = shelters[0];
+        }
+
+        const routeInfo = await getWalkingRoute(lat, lng, targetShelter.lat, targetShelter.lng);
+
+        session.status = "WALKING";
+        session.startLocation = { lat, lng };
+        session.startTime = getJapanNowTimestamp();
+        session.initialDistance = routeInfo.distanceMeters;
+        session.isRouteApi = routeInfo.isRouteApi;
+        await saveSession(userId, session);
+
+        const startTimeStr = formatJapanTime(session.startTime);
+        const fallbackNotice = routeInfo.notice || "";
+
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🚀 【避難開始】を記録しました！\n\n` +
+                `🎯 目標避難所: ${targetShelter.name}\n` +
+                `⏰ 開始時刻: ${startTimeStr}\n` +
+                `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n` +
+                `🚶 徒歩ルート距離: 約 ${formatDistance(routeInfo.distanceMeters)}\n` +
+                `⏱️ 徒歩予想時間: 約 ${formatDuration(routeInfo.durationSeconds)}\n` +
+                `${fallbackNotice}\n` +
+                `周囲の安全に注意して避難所へ向かってください。\n\n` +
+                `到着時、または途中でやめたくなった場合も「ゴール」と送信するか、現在地（位置情報）を送信してください。`
+            }
+          ]
+        });
       }
 
-      const routeInfo = await getWalkingRoute(lat, lng, targetShelter.lat, targetShelter.lng);
-
-      session.status = "WALKING";
-      session.startLocation = { lat, lng };
-      session.startTime = getJapanNowTimestamp();
-      session.initialDistance = routeInfo.distanceMeters;
-      session.isRouteApi = routeInfo.isRouteApi;
-      await saveSession(userId, session);
-
-      const startTimeStr = formatJapanTime(session.startTime);
-      const fallbackNotice = routeInfo.notice || "";
-    
-      return client.replyMessage({
-        replyToken: event.replyToken,
-        messages: [
-          {
-            type: "text",
-            text:
-              `🚀 【避難開始】を記録しました！\n\n` +
-              `🎯 目標避難所: ${targetShelter.name}\n` +
-              `⏰ 開始時刻: ${startTimeStr}\n` +
-              `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n` +
-              `🚶 徒歩ルート距離: 約 ${formatDistance(routeInfo.distanceMeters)}\n` +
-              `⏱️ 徒歩予想時間: 約 ${formatDuration(routeInfo.durationSeconds)}\n` +
-              `${fallbackNotice}\n` +
-              `周囲の安全に注意して避難所へ向かってください。\n\n` +
-              `到着時、または途中でやめたくなった場合も「ゴール」と送信するか、現在地（位置情報）を送信してください。`
-          }
-        ]
-      });
-    }
-
-
-      // ② ゴール地点の登録 ＆ 時間・徒歩距離の計算
+      // ② ゴール地点の登録 ＆ 計算
       const endTime = session.goalTime || getJapanNowTimestamp();
       const goalLat = lat;
       const goalLng = lng;
-      
-      // セッションに避難所が入っていない場合は、Firestoreから取得して先頭を使う
+
       let targetShelter = session.targetShelter;
       if (!targetShelter) {
         const shelters = await getShelterList();
         targetShelter = shelters[0];
       }
-      // 時間計算
+
       const elapsedSeconds = Math.max(1, Math.floor((endTime - session.startTime) / 1000));
       const minutes = Math.floor(elapsedSeconds / 60);
       const seconds = elapsedSeconds % 60;
       const timeText = minutes > 0 ? `${minutes}分 ${seconds}秒` : `${seconds}秒`;
 
-      // スタート〜ゴール間の実際の徒歩移動距離
       const walkedRoute = await getWalkingRoute(
         session.startLocation.lat,
         session.startLocation.lng,
@@ -933,7 +917,6 @@ async function handleEvent(event) {
         goalLng
       );
 
-      // 目標避難所までの残りの徒歩距離
       const remainRoute = await getWalkingRoute(
         goalLat,
         goalLng,
@@ -971,7 +954,6 @@ async function handleEvent(event) {
 
       const fallbackNotice = walkedRoute.notice || remainRoute.notice || "";
 
-      // まず結果メッセージを作る
       const resultMessage =
         `${arrivalMessage}` +
         `━━━━━━━━━━━━━━\n` +
@@ -985,70 +967,37 @@ async function handleEvent(event) {
         `避難訓練お疲れ様でした！\n` +
         `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
 
-        // ── 追加：ポイント付与ロジック ──
-try {
-  const userRef = db.collection("users").doc(userId);
-  const userDoc = await userRef.get();
+      // ── ポイント計算とFirestore保存 ──
+      let addPoint = 0;
+      let totalPoints = 0;
 
-  let currentPoints = 0;
-  if (userDoc.exists) {
-    currentPoints = userDoc.data().points || 0;
-  }
+      try {
+        const userRef = db.collection("users").doc(userId);
+        const userDoc = await userRef.get();
 
-  let addPoint = 0;
+        let currentPoints = 0;
+        if (userDoc.exists) {
+          currentPoints = userDoc.data().points || 0;
+        }
 
-  // ① 避難所到達（300m以内）
-  if (isArrived) {
-    addPoint += 2;
-  }
+        if (isArrived) addPoint += 2;
+        if (initialDist > 0 && remainDist < initialDist * 0.5) addPoint += 1;
+        if (initialDist > 0 && remainDist < initialDist * 0.2) addPoint += 1;
 
-  // ② 初期距離の50%以内まで到達
-  if (initialDist > 0 && remainDist < initialDist * 0.5) {
-    addPoint += 1;
-  }
+        const estimatedSeconds = walkedRoute.durationSeconds;
+        if (elapsedSeconds < estimatedSeconds - 60) addPoint += 1;
+        if (elapsedSeconds < estimatedSeconds - 180) addPoint += 1;
 
-  // ③ 初期距離の20%以内まで到達
-  if (initialDist > 0 && remainDist < initialDist * 0.2) {
-    addPoint += 1;
-  }
+        totalPoints = currentPoints + addPoint;
 
-  // ④ 徒歩時間の推定より早く到着した場合のポイント
-  const estimatedSeconds = walkedRoute.durationSeconds;
+        // 修正点：update ではなく set merge を使用（未作成ドキュメント対策）
+        await userRef.set({ points: totalPoints }, { merge: true });
 
-  // 1分早ければ +1pt
-  if (elapsedSeconds < estimatedSeconds - 60) {
-    addPoint += 1;
-  }
-
-  // 3分早ければさらに +1pt
-  if (elapsedSeconds < estimatedSeconds - 180) {
-    addPoint += 1;
-  }
-
-  // Firestore に保存
-  await userRef.update({
-    points: currentPoints + addPoint
-  });
-
-  // LINE にポイント通知
-  await client.pushMessage({
-    to: userId,
-    messages: [
-      {
-        type: "text",
-        text:
-          `🎁【ポイント獲得】\n` +
-          `今回の避難訓練で *${addPoint} pt* を獲得しました！\n\n` +
-          `現在の合計ポイント：${currentPoints + addPoint} pt`
+      } catch (e) {
+        console.error("ポイント付与エラー:", e.message);
       }
-    ]
-  });
 
-} catch (e) {
-  console.error("ポイント付与エラー:", e.message);
-}
-      // 研究用ログを Firestore / メモリに保存
-      // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存し、ミリ秒も併記する
+      // 研究用ログの保存
       const drillLog = {
         drillId: `drill_${Date.now()}_${userId.slice(-6)}`,
         userId: userId,
@@ -1073,26 +1022,25 @@ try {
       };
       await saveEvacuationLog(drillLog);
 
-      // セッション削除
       await deleteSession(userId);
 
-      // ✅ ゴール後のメッセージに「使い方」テキストを自動追加
-      return client.replyMessage({
+      // 修正点：pushMessage ではなく 1回の replyMessage にまとめて返信
+      const responseMessages = [
+        { type: "text", text: resultMessage },
+        {
+          type: "text",
+          text: `🎁【ポイント獲得】\n今回の避難訓練で *${addPoint} pt* を獲得しました！\n\n現在の合計ポイント：${totalPoints} pt`
+        },
+        { type: "text", text: getHelpMessage() }
+      ];
+
+      return await client.replyMessage({
         replyToken: event.replyToken,
-        messages: [
-          {
-            type: "text",
-            text: resultMessage
-          },
-          {
-            type: "text",
-            text: getHelpMessage()
-          }
-        ]
+        messages: responseMessages
       });
     }
 
-    return Promise.resolve(null);
+    return null;
   } catch (globalErr) {
     console.error("Global handleEvent error:", globalErr);
     if (event.replyToken) {
@@ -1110,7 +1058,7 @@ try {
         console.error("Failed to send error reply:", replyErr);
       }
     }
-    return Promise.resolve(null);
+    return null;
   }
 }
 
