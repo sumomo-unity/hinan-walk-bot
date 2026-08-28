@@ -213,6 +213,9 @@ async function geocodeAddress(item) {
 }
 
 // ── 6.6. CSVインポート処理 ──
+// 待機用ヘルパー関数を定義
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 async function importSheltersFromCsv(csvText) {
   const cleanCsvText = csvText.replace(/^\uFEFF/, "");
   const lines = cleanCsvText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
@@ -291,6 +294,7 @@ async function importSheltersFromCsv(csvText) {
 
       await db.collection("shelters").doc(shelterData.id).set(shelterData);
       successShelters.push(shelterData);
+      await sleep(200);
     } catch (err) {
       errors.push(`行 ${i + 1} (${item.name}): ${err.message}`);
     }
