@@ -893,7 +893,38 @@ async function handleEvent(event) {
     // 3. 位置情報メッセージ処理
     if (event.type === "message" && event.message.type === "location") {
       if (!session) {
-        return null;
+        // ── 訓練前の位置情報 → 最寄り避難所検索 ──
+if (!session) {
+  const lat = event.message.latitude;
+  const lng = event.message.longitude;
+
+  const shelters = await getShelterList();
+  let nearest = null;
+  let minDist = Infinity;
+
+  shelters.forEach(s => {
+    const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
+    if (d < minDist) {
+      minDist = d;
+      nearest = s;
+    }
+  });
+
+  return await client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text:
+          `📍 最寄りの避難所は「${nearest.name}」です。\n` +
+          `距離: ${Math.round(minDist)}m\n` +
+          `住所: ${nearest.address}\n\n` +
+          `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
+      }
+    ]
+  });
+}
+
       }
 
       const lat = event.message.latitude;
