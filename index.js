@@ -927,6 +927,18 @@ async function handleEvent(event) {
 
       // まず結果メッセージを作る
       const resultMessage =
+        `${arrivalMessage}` +
+        `━━━━━━━━━━━━━━\n` +
+        `🏢 目標避難所: ${targetShelter.name}\n` +
+        `⏱️ 実際の避難時間: ${timeText}\n` +
+        `🚶 実際の移動距離: ${formatDistance(walkedRoute.distanceMeters)}\n` +
+        `${fallbackNotice}` +
+        `━━━━━━━━━━━━━━\n` +
+        `📍 スタート: 北緯 ${startLatStr}, 東経 ${startLngStr}\n` +
+        `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
+        `避難訓練お疲れ様でした！\n` +
+        `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
+
         // ── 追加：ポイント付与ロジック ──
 try {
   const userRef = db.collection("users").doc(userId);
@@ -989,23 +1001,6 @@ try {
 } catch (e) {
   console.error("ポイント付与エラー:", e.message);
 }
-
-        `${arrivalMessage}` +
-        `━━━━━━━━━━━━━━\n` +
-        `🏢 目標避難所: ${targetShelter.name}\n` +
-        `⏱️ 実際の避難時間: ${timeText}\n` +
-        `🚶 実際の移動距離: ${formatDistance(walkedRoute.distanceMeters)}\n` +
-        `${fallbackNotice}` +
-        `━━━━━━━━━━━━━━\n` +
-        `📍 スタート: 北緯 ${startLatStr}, 東経 ${startLngStr}\n` +
-        `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
-        `避難訓練お疲れ様でした！\n` +
-        `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
-
-      // ★ここにポイント付与ロジックを貼る★
-      // 例: ユーザーの到達状況に応じてポイントを付与する処理をここに実装してください。
-      // await awardPointsToUser(userId, { achievementLevel, elapsedSeconds, walkedDistance: walkedRoute.distanceMeters });
-
       // 研究用ログを Firestore / メモリに保存
       // ✅ タイムスタンプをISO 8601形式の日本時間文字列で保存し、ミリ秒も併記する
       const drillLog = {
