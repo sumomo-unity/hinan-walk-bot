@@ -18,75 +18,6 @@ const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
 });
 
-// ── 3. 熊谷市 避難所初期マスタデータ ──
-const KUMAGAYA_SHELTERS = [
-  {
-    id: "kumagaya_1",
-    name: "熊谷市役所（本庁舎）",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定緊急避難場所",
-    address: "埼玉県熊谷市宮町2丁目47-1",
-    lat: 36.147285,
-    lng: 139.388701,
-    tagColor: "#27ae60"
-  },
-  {
-    id: "kumagaya_2",
-    name: "熊谷市立熊谷東小学校",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所（地震・水害）",
-    address: "埼玉県熊谷市末広3丁目1-1",
-    lat: 36.148150,
-    lng: 139.397620,
-    tagColor: "#2980b9"
-  },
-  {
-    id: "kumagaya_3",
-    name: "熊谷市立熊谷南小学校",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所（地震・水害）",
-    address: "埼玉県熊谷市万平町2丁目1",
-    lat: 36.136200,
-    lng: 139.387800,
-    tagColor: "#2980b9"
-  },
-  {
-    id: "kumagaya_4",
-    name: "熊谷市立熊谷西小学校",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所（地震）",
-    address: "埼玉県熊谷市新島123",
-    lat: 36.155800,
-    lng: 139.369500,
-    tagColor: "#2980b9"
-  },
-  {
-    id: "kumagaya_5",
-    name: "熊谷スポーツ文化公園",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "広域避難場所",
-    address: "埼玉県熊谷市上川上300",
-    lat: 36.166800,
-    lng: 139.412500,
-    tagColor: "#e67e22"
-  },
-  {
-    id: "kumagaya_6",
-    name: "妻沼中央公民館",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所",
-    address: "埼玉県熊谷市妻沼東1丁目1",
-    lat: 36.231200,
-    lng: 139.387500,
-    tagColor: "#8e44ad"
-  }
-];
 
 // メモリ保持用フォールバック
 const memorySessions = new Map();
@@ -216,10 +147,12 @@ async function getShelterList() {
     if (!snapshot.empty) {
       return snapshot.docs.map((doc) => doc.data());
     }
+    // shelters コレクションが空の場合は、空配列を返す
+    return [];
   } catch (e) {
-    console.warn("Firestore shelters get failed, using fallback:", e.message);
+    console.warn("Firestore shelters get failed:", e.message);
+    return [];
   }
-  return KUMAGAYA_SHELTERS;
 }
 
 // ── 7. 位置情報ガード ──
@@ -834,49 +767,59 @@ async function handleEvent(event) {
         });
       }
 
-      // ① スタート地点の登録
-      if (!session.startLocation || !session.startTime) {
-        const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
-
-        const routeInfo = await getWalkingRoute(lat, lng, targetShelter.lat, targetShelter.lng);
-
-        session.status = "WALKING";
-        session.startLocation = { lat, lng };
-        session.startTime = getJapanNowTimestamp();
-        session.initialDistance = routeInfo.distanceMeters;
-        session.isRouteApi = routeInfo.isRouteApi;
-        await saveSession(userId, session);
-
-        const startTimeStr = formatJapanTime(session.startTime);
-
-        const fallbackNotice = routeInfo.notice || "";
-
-        return client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [
-            {
-              type: "text",
-              text:
-                `🚀 【避難開始】を記録しました！\n\n` +
-                `🎯 目標避難所: ${targetShelter.name}\n` +
-                `⏰ 開始時刻: ${startTimeStr}\n` +
-                `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n` +
-                `🚶 徒歩ルート距離: 約 ${formatDistance(routeInfo.distanceMeters)}\n` +
-                `⏱️ 徒歩予想時間: 約 ${formatDuration(routeInfo.durationSeconds)}\n` +
-                `${fallbackNotice}\n` +
-                `周囲の安全に注意して避難所へ向かってください。\n\n` +
-                `到着時、または途中でやめたくなった場合も「ゴール」と送信するか、現在地（位置情報）を送信してください。`
-            }
-          ]
-        });
+    // ① スタート地点の登録
+    if (!session.startLocation || !session.startTime) {
+      // セッションに避難所が入っていない場合は、Firestoreから一覧を取得して先頭を使う
+      let targetShelter = session.targetShelter;
+      if (!targetShelter) {
+        const shelters = await getShelterList();
+        targetShelter = shelters[0]; // 少なくとも1件はある前提
       }
+
+      const routeInfo = await getWalkingRoute(lat, lng, targetShelter.lat, targetShelter.lng);
+
+      session.status = "WALKING";
+      session.startLocation = { lat, lng };
+      session.startTime = getJapanNowTimestamp();
+      session.initialDistance = routeInfo.distanceMeters;
+      session.isRouteApi = routeInfo.isRouteApi;
+      await saveSession(userId, session);
+
+      const startTimeStr = formatJapanTime(session.startTime);
+      const fallbackNotice = routeInfo.notice || "";
+    
+      return client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              `🚀 【避難開始】を記録しました！\n\n` +
+              `🎯 目標避難所: ${targetShelter.name}\n` +
+              `⏰ 開始時刻: ${startTimeStr}\n` +
+              `📍 スタート座標: 北緯 ${lat.toFixed(5)}, 東経 ${lng.toFixed(5)}\n` +
+              `🚶 徒歩ルート距離: 約 ${formatDistance(routeInfo.distanceMeters)}\n` +
+              `⏱️ 徒歩予想時間: 約 ${formatDuration(routeInfo.durationSeconds)}\n` +
+              `${fallbackNotice}\n` +
+              `周囲の安全に注意して避難所へ向かってください。\n\n` +
+              `到着時、または途中でやめたくなった場合も「ゴール」と送信するか、現在地（位置情報）を送信してください。`
+          }
+        ]
+      });
+    }
+
 
       // ② ゴール地点の登録 ＆ 時間・徒歩距離の計算
       const endTime = session.goalTime || getJapanNowTimestamp();
       const goalLat = lat;
       const goalLng = lng;
-      const targetShelter = session.targetShelter || KUMAGAYA_SHELTERS[0];
-
+      
+      // セッションに避難所が入っていない場合は、Firestoreから取得して先頭を使う
+      let targetShelter = session.targetShelter;
+      if (!targetShelter) {
+        const shelters = await getShelterList();
+        targetShelter = shelters[0];
+      }
       // 時間計算
       const elapsedSeconds = Math.max(1, Math.floor((endTime - session.startTime) / 1000));
       const minutes = Math.floor(elapsedSeconds / 60);
