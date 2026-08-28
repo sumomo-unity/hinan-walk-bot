@@ -567,6 +567,25 @@ app.get("/export/csv", async (req, res) => {
   }
 });
 
+// ── 13. CSVインポートAPI（職員用） ──
+app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => {
+  try {
+    const csvText = req.body;
+
+    if (!csvText || csvText.length === 0) {
+      return res.status(400).send("CSVデータが空です");
+    }
+
+    const count = await importSheltersFromCsv(csvText);
+
+    return res.status(200).send(`インポート完了: ${count} 件の避難所を登録しました`);
+  } catch (err) {
+    console.error("CSV Import error:", err);
+    return res.status(500).send("CSVインポートに失敗しました: " + err.message);
+  }
+});
+
+
 // ── 12. 危険箇所QR（hazard?id=xxx）エンドポイント ──
 app.get("/hazard", async (req, res) => {
   try {
