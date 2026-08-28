@@ -153,81 +153,135 @@ async function getShelterList() {
   }
 }
 
-// ── 6.5. Google Maps Geocoding API（住所 → 緯度経度） ──
-async function geocodeAddress(address) {
+// ── 6.5. Google Maps Geocoding API（検索クエリ補正 ＆ フォールバック機能付き） ──
+async function geocodeAddress(item) {
   const apiKey = config.googleMapsApiKey;
   if (!apiKey) {
     throw new Error("Google Maps API Key が設定されていません");
   }
 
-  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${apiKey}`;
+  // 1. 最も精度の高い検索クエリの構築 (例: 埼玉県 熊谷市 宮町2丁目47-1)
+  const fullAddress = `${item.prefecture || ""}${item.city || ""}${item.address || ""}`.trim();
+  
+  // 2. 住所が曖昧だった場合のバックアップ用クエリ (例: 埼玉県 熊谷市 熊谷市役所)
+  const fallbackQuery = `${item.prefecture || ""}${item.city || ""}${item.name || ""}`.trim();
 
-  try {
+  const fetchCoords = async (query) => {
+    const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${apiKey}`;
     const response = await fetch(url);
     const data = await response.json();
+    if (data.status === "OK" && data.results && data.results.length > 0) {
+      return data.results[0].geometry.location;
+    }
+    return null;
+  };
 
-    if (data.status !== "OK" || !data.results || data.results.length === 0) {
-      throw new Error(`住所のジオコーディングに失敗しました: ${address}`);
+  try {
+    // 優先度の高い住所で検索
+    let location = await fetchCoords(fullAddress);
+
+    // ZERO_RESULTS などの場合は施設名ベースで再検索（フォールバック）
+    if (!location && fallbackQuery !== fullAddress) {
+      console.warn(`住所での検索結果が0件のため、施設名で再検索します: "${fallbackQuery}"`);
+      location = await fetchCoords(fallbackQuery);
     }
 
-    const location = data.results[0].geometry.location;
+    if (!location) {
+      throw new Error(`位置情報を特定できませんでした（検索クエリ: "${fullAddress}" / "${fallbackQuery}"）`);
+    }
+
     return {
       lat: location.lat,
       lng: location.lng
     };
   } catch (err) {
-    console.error("Geocoding error:", err);
+    console.error(`Geocoding error [${item.name}]:`, err.message);
     throw err;
   }
 }
 
-// ── 6.6. CSVインポート処理（住所 → 緯度経度自動取得） ──
+// ── 6.6. CSVインポート処理（堅牢版） ──
 async function importSheltersFromCsv(csvText) {
-  const lines = csvText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
+  // BOM（\uFEFF）を自動削除して改行分割
+  const cleanCsvText = csvText.replace(/^\uFEFF/, "");
+  const lines = cleanCsvText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
 
   if (lines.length < 2) {
     throw new Error("CSVデータにヘッダーまたはデータが存在しません");
   }
 
-  const header = lines[0].split(",").map(h => h.replace(/^"|"$/g, ''));
-  const expectedHeader = ["id", "name", "address", "type", "city", "prefecture", "tagColor"];
+  // カンマ区切り（ダブルクォーテーション考慮の正規表現）
+  const parseCsvLine = (line) => {
+    const matches = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g);
+    // 単純な split ではなく引用符に対応
+    return line.split(",").map(c => c.replace(/^"|"$/g, '').trim());
+  };
 
-  if (header.length !== expectedHeader.length || !header.every((h, i) => h === expectedHeader[i])) {
-    throw new Error("CSVヘッダーが正しくありません。正しい形式: id,name,address,type,city,prefecture,tagColor");
+  // 1. ヘッダーの小文字化・トリム化で柔軟に判定
+  const rawHeader = parseCsvLine(lines[0]);
+  const headerMap = {};
+  
+  rawHeader.forEach((h, index) => {
+    headerMap[h.toLowerCase()] = index;
+  });
+
+  const requiredFields = ["id", "name", "address", "type", "city", "prefecture", "tagcolor"];
+  const missingFields = requiredFields.filter(f => !(f in headerMap));
+
+  if (missingFields.length > 0) {
+    throw new Error(`CSVに必要なヘッダーが含まれていません。不足: ${missingFields.join(", ")}`);
   }
 
-  const shelters = [];
+  const successShelters = [];
+  const errors = [];
 
+  // 2. 行ごとの処理（エラーがあっても中断せず記録）
   for (let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(",").map(c => c.replace(/^"|"$/g, ''));
+    const cols = parseCsvLine(lines[i]);
 
-    if (cols.length !== expectedHeader.length) {
-      console.warn(`列数が一致しません（行 ${i + 1}）:`, lines[i]);
+    if (cols.length < requiredFields.length) {
+      errors.push(`行 ${i + 1}: 列数が足りません`);
       continue;
     }
 
-    const [id, name, address, type, city, prefecture, tagColor] = cols;
+    const item = {
+      id: cols[headerMap["id"]],
+      name: cols[headerMap["name"]],
+      address: cols[headerMap["address"]],
+      type: cols[headerMap["type"]],
+      city: cols[headerMap["city"]],
+      prefecture: cols[headerMap["prefecture"]],
+      tagColor: cols[headerMap["tagcolor"]] || "#2980b9"
+    };
 
-    const { lat, lng } = await geocodeAddress(address);
+    if (!item.id || !item.name) {
+      errors.push(`行 ${i + 1}: id または name が空です`);
+      continue;
+    }
 
-    shelters.push({
-      id,
-      name,
-      address,
-      type,
-      city,
-      prefecture,
-      tagColor,
-      lat,
-      lng
-    });
+    try {
+      // 住所・施設名から緯度経度を取得
+      const { lat, lng } = await geocodeAddress(item);
+
+      const shelterData = {
+        ...item,
+        lat,
+        lng
+      };
+
+      // Firestoreに保存
+      await db.collection("shelters").doc(shelterData.id).set(shelterData);
+      successShelters.push(shelterData);
+    } catch (err) {
+      errors.push(`行 ${i + 1} (${item.name}): ${err.message}`);
+    }
   }
 
-  for (const shelter of shelters) {
-    await db.collection("shelters").doc(shelter.id).set(shelter);
-  }
-
-  return shelters.length;
+  return {
+    successCount: successShelters.length,
+    totalLines: lines.length - 1,
+    errors
+  };
 }
 
 // ── 7. 位置情報ガード ──
@@ -567,7 +621,7 @@ app.get("/export/csv", async (req, res) => {
   }
 });
 
-// ── 13. CSVインポートAPI（職員用） ──
+// ── 13. CSVインポートAPI（レスポンス拡張版） ──
 app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => {
   try {
     const csvText = req.body;
@@ -576,9 +630,14 @@ app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => 
       return res.status(400).send("CSVデータが空です");
     }
 
-    const count = await importSheltersFromCsv(csvText);
+    const result = await importSheltersFromCsv(csvText);
 
-    return res.status(200).send(`インポート完了: ${count} 件の避難所を登録しました`);
+    let responseMsg = `【インポート結果】\n成功: ${result.successCount} / ${result.totalLines} 件\n`;
+    if (result.errors.length > 0) {
+      responseMsg += `\n⚠️ 以下のエラーが発生しました:\n` + result.errors.join("\n");
+    }
+
+    return res.status(200).send(responseMsg);
   } catch (err) {
     console.error("CSV Import error:", err);
     return res.status(500).send("CSVインポートに失敗しました: " + err.message);
