@@ -940,148 +940,218 @@ async function handleEvent(event) {
       return null;
     }
 
-           // 3. 位置情報メッセージ処理
-    if (event.type === "message" && event.message.type === "location") {
+          // 3. 位置情報メッセージ処理
+  if (event.type === "message" && event.message.type === "location") {
 
-      // ── 訓練前（session が null）の最寄り避難所検索 ──
-      if (!session) {
-        const lat = event.message.latitude;
-        const lng = event.message.longitude;
-
-        const shelters = await getShelterList();
-        let nearest = null;
-        let minDist = Infinity;
-
-        shelters.forEach(s => {
-          const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
-          if (d < minDist) {
-            minDist = d;
-            nearest = s;
-          }
-        });
-
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [
-            {
-              type: "text",
-              text:
-                `📍 最寄りの避難所は「${nearest.name}」です。\n` +
-                `距離: ${Math.round(minDist)}m\n` +
-                `住所: ${nearest.address}\n\n` +
-                `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
-            }
-          ]
-        });
-      }
-
-      // ── 訓練中の位置情報処理（スタート地点 or ゴール地点） ──
+    // ── 訓練前（session が null）の最寄り避難所検索 ──
+    if (!session) {
       const lat = event.message.latitude;
       const lng = event.message.longitude;
 
-      if (!isValidJapanCoordinate(lat, lng)) {
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [
-            {
-              type: "text",
-              text:
-                "⚠️ 位置情報が正しく取得できませんでした。\n" +
-                "電波状況の良い場所で、もう一度LINEの「＋」メニューから【位置情報】を送信してください。"
-            }
-          ]
-        });
-      }
+      const shelters = await getShelterList();
+      let nearest = null;
+      let minDist = Infinity;
 
-      // ① スタート地点の登録
-      if (!session.startLocation || !session.startTime) {
-        session.startLocation = { lat, lng };
-        session.startTime = getJapanNowTimestamp();
+      shelters.forEach(s => {
+        const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
+        if (d < minDist) {
+          minDist = d;
+          nearest = s;
+        }
+      });
 
-        const dist = calculateHaversineDistance(
-          lat,
-          lng,
-          session.targetShelter.lat,
-          session.targetShelter.lng
-        );
-
-        session.initialDistance = Math.round(dist);
-        await saveSession(userId, session);
-
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [
-            {
-              type: "text",
-              text:
-                `🚶‍♂️ スタート地点を記録しました！\n` +
-                `目標避難所までの距離: 約 ${session.initialDistance}m\n\n` +
-                `避難を開始してください。\nゴールしたら「ゴール」と送信してください。`
-            }
-          ]
-        });
-      }
-
-      // ② ゴール地点の登録
-      if (session.status === "WAITING_GOAL_LOCATION") {
-        session.goalLocation = { lat, lng };
-        session.goalTime = getJapanNowTimestamp();
-
-        const route = await getWalkingRoute(
-          session.startLocation.lat,
-          session.startLocation.lng,
-          lat,
-          lng
-        );
-
-        const elapsedSeconds = Math.round((session.goalTime - session.startTime) / 1000);
-
-        const logData = {
-          userId,
-          drillId: "default",
-          shelterId: session.targetShelter.id,
-          shelterName: session.targetShelter.name,
-          shelterCity: session.targetShelter.city,
-          startTime: session.startTime,
-          endTime: session.goalTime,
-          elapsedSeconds,
-          startLat: session.startLocation.lat,
-          startLng: session.startLocation.lng,
-          goalLat: lat,
-          goalLng: lng,
-          walkedDistanceMeters: route.distanceMeters,
-          initialDistanceMeters: session.initialDistance,
-          remainingDistanceMeters: 0,
-          isArrived: true,
-          achievementLevel: "",
-          routeSource: route.isRouteApi ? "ROUTE_API" : "STRAIGHT"
-        };
-
-        await saveEvacuationLog(logData);
-        await deleteSession(userId);
-
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [
-            {
-              type: "text",
-              text:
-                `🎉 避難訓練が完了しました！\n\n` +
-                `⏱️ 所要時間: ${formatDuration(elapsedSeconds)}\n` +
-                `🚶 移動距離: ${formatDistance(route.distanceMeters)}\n\n` +
-                `お疲れさまでした！`
-            }
-          ]
-        });
-      }
-
-      return null;
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              `📍 最寄りの避難所は「${nearest.name}」です。\n` +
+              `距離: ${Math.round(minDist)}m\n` +
+              `住所: ${nearest.address}\n\n` +
+              `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
+          }
+        ]
+      });
     }
-  } catch (err) {
-    console.error("handleEvent error:", err);
-  }
-}
 
+    // ── 訓練中の位置情報処理（スタート地点 or ゴール地点） ──
+    const lat = event.message.latitude;
+    const lng = event.message.longitude;
+
+    if (!isValidJapanCoordinate(lat, lng)) {
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              "⚠️ 位置情報が正しく取得できませんでした。\n" +
+              "電波状況の良い場所で、もう一度LINEの「＋」メニューから【位置情報】を送信してください。"
+          }
+        ]
+      });
+    }
+
+    // ① スタート地点の登録
+    if (!session.startLocation || !session.startTime) {
+      session.startLocation = { lat, lng };
+      session.startTime = getJapanNowTimestamp();
+
+      const dist = calculateHaversineDistance(
+        lat,
+        lng,
+        session.targetShelter.lat,
+        session.targetShelter.lng
+      );
+
+      session.initialDistance = Math.round(dist);
+      session.status = "IN_PROGRESS"; // ステータスを更新
+      await saveSession(userId, session);
+
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              `🚶‍♂️ スタート地点を記録しました！\n` +
+              `目標避難所までの距離: 約 ${session.initialDistance}m\n\n` +
+              `避難を開始してください。\nゴールしたら「ゴール」と送信してください。`
+          }
+        ]
+      });
+    }
+
+    // ② ゴール地点の登録
+    if (session.status === "WAITING_GOAL_LOCATION") {
+      const endTime = getJapanNowTimestamp();
+      session.goalLocation = { lat, lng };
+      session.goalTime = endTime;
+
+      const route = await getWalkingRoute(
+        session.startLocation.lat,
+        session.startLocation.lng,
+        lat,
+        lng
+      );
+
+      const elapsedSeconds = Math.round((endTime - session.startTime) / 1000);
+      const remainDist = calculateHaversineDistance(
+        lat,
+        lng,
+        session.targetShelter.lat,
+        session.targetShelter.lng
+      );
+      const isArrived = remainDist <= 50; // 50m以内をゴール到達と判定
+
+      // ── ポイント計算とFirestore更新 ──
+      let addPoint = 0;
+      let totalPoints = 0;
+
+      try {
+        const userRef = db.collection("users").doc(userId);
+        const userDoc = await userRef.get();
+
+        let currentPoints = 0;
+        if (userDoc.exists) {
+          currentPoints = userDoc.data().points || 0;
+        }
+
+        // ポイント計算ロジック
+        if (isArrived) addPoint += 2;
+        if (session.initialDistance > 0 && remainDist < session.initialDistance * 0.5) addPoint += 1;
+        if (session.initialDistance > 0 && remainDist < session.initialDistance * 0.2) addPoint += 1;
+
+        const estimatedSeconds = route.durationSeconds || 0;
+        if (estimatedSeconds > 0 && elapsedSeconds < estimatedSeconds - 60) addPoint += 1;
+
+        totalPoints = currentPoints + addPoint;
+
+        // ユーザーのポイントを更新（未作成時は新規作成）
+        await userRef.set({ points: totalPoints }, { merge: true });
+      } catch (pErr) {
+        console.error("ポイント付与エラー:", pErr.message);
+      }
+
+      // ── 研究用ログの保存 ──
+      const logData = {
+        drillId: `drill_${endTime}_${userId.slice(-6)}`,
+        userId: userId,
+        shelterId: session.targetShelter.id || "",
+        shelterName: session.targetShelter.name || "",
+        shelterCity: session.targetShelter.city || "熊谷市",
+        startTime: toJapanISOString(session.startTime),
+        startTimeMs: session.startTime,
+        endTime: toJapanISOString(endTime),
+        endTimeMs: endTime,
+        elapsedSeconds: elapsedSeconds,
+        startLat: session.startLocation.lat,
+        startLng: session.startLocation.lng,
+        goalLat: lat,
+        goalLng: lng,
+        walkedDistanceMeters: route.distanceMeters,
+        initialDistanceMeters: session.initialDistance,
+        remainingDistanceMeters: Math.round(remainDist),
+        isArrived: isArrived,
+        achievementLevel: isArrived ? "COMPLETE" : "INCOMPLETE",
+        routeSource: route.isRouteApi ? "GOOGLE_ROUTES_API" : "HAVERSINE_ESTIMATED"
+      };
+
+      await saveEvacuationLog(logData);
+      await deleteSession(userId);
+
+      // ── 返信メッセージ群の構築 ──
+      const resultMessage =
+        `🎉 避難訓練が完了しました！\n\n` +
+        `🏢 目標避難所: ${session.targetShelter.name}\n` +
+        `⏱️ 所要時間: ${formatDuration(elapsedSeconds)}\n` +
+        `🚶 移動距離: ${formatDistance(route.distanceMeters)}\n\n` +
+        `お疲れさまでした！`;
+
+      const responseMessages = [
+        { type: "text", text: resultMessage }
+      ];
+
+      if (addPoint > 0) {
+        responseMessages.push({
+          type: "text",
+          text: `🎁【ポイント獲得】\n今回の避難訓練で *${addPoint} pt* を獲得しました！\n\n現在の合計ポイント：${totalPoints} pt`
+        });
+      } else {
+        responseMessages.push({
+          type: "text",
+          text: `現在の合計ポイント：${totalPoints} pt`
+        });
+      }
+
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: responseMessages
+      });
+    }
+
+    return null;
+  }
+} catch (globalErr) {
+  console.error("Global handleEvent error:", globalErr);
+  if (event.replyToken) {
+    try {
+      await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text: "⚠️ 一時的なエラーが発生しました。もう一度「スタート」と送信してお試しください。"
+          }
+        ]
+      });
+    } catch (replyErr) {
+      console.error("Failed to send error reply:", replyErr);
+    }
+  }
+  return null;
+}
 
 // ── 12. サーバー起動処理 ──
 const PORT = process.env.PORT || 8080;
