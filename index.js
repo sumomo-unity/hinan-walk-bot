@@ -927,6 +927,69 @@ async function handleEvent(event) {
 
       // まず結果メッセージを作る
       const resultMessage =
+        // ── 追加：ポイント付与ロジック ──
+try {
+  const userRef = db.collection("users").doc(userId);
+  const userDoc = await userRef.get();
+
+  let currentPoints = 0;
+  if (userDoc.exists) {
+    currentPoints = userDoc.data().points || 0;
+  }
+
+  let addPoint = 0;
+
+  // ① 避難所到達（300m以内）
+  if (isArrived) {
+    addPoint += 2;
+  }
+
+  // ② 初期距離の50%以内まで到達
+  if (initialDist > 0 && remainDist < initialDist * 0.5) {
+    addPoint += 1;
+  }
+
+  // ③ 初期距離の20%以内まで到達
+  if (initialDist > 0 && remainDist < initialDist * 0.2) {
+    addPoint += 1;
+  }
+
+  // ④ 徒歩時間の推定より早く到着した場合のポイント
+  const estimatedSeconds = walkedRoute.durationSeconds;
+
+  // 1分早ければ +1pt
+  if (elapsedSeconds < estimatedSeconds - 60) {
+    addPoint += 1;
+  }
+
+  // 3分早ければさらに +1pt
+  if (elapsedSeconds < estimatedSeconds - 180) {
+    addPoint += 1;
+  }
+
+  // Firestore に保存
+  await userRef.update({
+    points: currentPoints + addPoint
+  });
+
+  // LINE にポイント通知
+  await client.pushMessage({
+    to: userId,
+    messages: [
+      {
+        type: "text",
+        text:
+          `🎁【ポイント獲得】\n` +
+          `今回の避難訓練で *${addPoint} pt* を獲得しました！\n\n` +
+          `現在の合計ポイント：${currentPoints + addPoint} pt`
+      }
+    ]
+  });
+
+} catch (e) {
+  console.error("ポイント付与エラー:", e.message);
+}
+
         `${arrivalMessage}` +
         `━━━━━━━━━━━━━━\n` +
         `🏢 目標避難所: ${targetShelter.name}\n` +
