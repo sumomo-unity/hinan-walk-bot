@@ -597,7 +597,7 @@ app.get("/export/csv", async (req, res) => {
       l.startTime || "",
       l.endTime || "",
       l.elapsedSeconds || 0,
-      ((l.elapsedSeconds || 0) / 60).toFixed(2), // 修正点：.toFixed(2)
+      ((l.elapsedSeconds || 0) / 60).toFixed(2),
       l.startLat || "",
       l.startLng || "",
       l.goalLat || "",
@@ -837,29 +837,28 @@ async function handleEvent(event) {
       // ── C. ゴール後 / 未開始時の場合 ──
       // ── C-0. 訓練前（session が null）の避難所機能 ──
       if (!session) {
-      
         // ① 避難所一覧
         if (text === "避難所") {
           const shelters = await getShelterList();
           return await client.replyMessage({
             replyToken: event.replyToken,
-            messages: [ createShelterFlex(shelters) ]
+            messages: [createShelterFlex(shelters)]
           });
         }
-      
+
         // ② 避難所詳細（避難所 ○○）
         if (text.startsWith("避難所 ")) {
           const name = text.replace("避難所 ", "").trim();
           const shelters = await getShelterList();
           const shelter = shelters.find(s => s.name === name);
-      
+
           if (!shelter) {
             return await client.replyMessage({
               replyToken: event.replyToken,
               messages: [{ type: "text", text: `「${name}」という避難所は見つかりませんでした。` }]
             });
           }
-      
+
           return await client.replyMessage({
             replyToken: event.replyToken,
             messages: [
@@ -931,44 +930,41 @@ async function handleEvent(event) {
       return null;
     }
 
-   // 3. 位置情報メッセージ処理
-  if (event.type === "message" && event.message.type === "location") {
-  
-    // ── 訓練前（session が null）の最寄り避難所検索 ──
-    if (!session) {
-      const lat = event.message.latitude;
-      const lng = event.message.longitude;
-  
-      const shelters = await getShelterList();
-      let nearest = null;
-      let minDist = Infinity;
-  
-      shelters.forEach(s => {
-        const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
-        if (d < minDist) {
-          minDist = d;
-          nearest = s;
-        }
-      });
-  
-      return await client.replyMessage({
-        replyToken: event.replyToken,
-        messages: [
-          {
-            type: "text",
-            text:
-              `📍 最寄りの避難所は「${nearest.name}」です。\n` +
-              `距離: ${Math.round(minDist)}m\n` +
-              `住所: ${nearest.address}\n\n` +
-              `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
+    // 3. 位置情報メッセージ処理
+    if (event.type === "message" && event.message.type === "location") {
+      // ── 訓練前（session が null）の最寄り避難所検索 ──
+      if (!session) {
+        const lat = event.message.latitude;
+        const lng = event.message.longitude;
+
+        const shelters = await getShelterList();
+        let nearest = null;
+        let minDist = Infinity;
+
+        shelters.forEach(s => {
+          const d = calculateHaversineDistance(lat, lng, s.lat, s.lng);
+          if (d < minDist) {
+            minDist = d;
+            nearest = s;
           }
-        ]
-      });
-    }
+        });
 
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `📍 最寄りの避難所は「${nearest.name}」です。\n` +
+                `距離: ${Math.round(minDist)}m\n` +
+                `住所: ${nearest.address}\n\n` +
+                `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
+            }
+          ]
+        });
+      }
 
-  　
-
+      // ── 訓練中の位置情報処理 ──
       const lat = event.message.latitude;
       const lng = event.message.longitude;
 
@@ -991,6 +987,17 @@ async function handleEvent(event) {
         let targetShelter = session.targetShelter;
         if (!targetShelter) {
           const shelters = await getShelterList();
+          if (shelters.length === 0) {
+            return await client.replyMessage({
+              replyToken: event.replyToken,
+              messages: [
+                {
+                  type: "text",
+                  text: "申し訳ございません。避難所データが登録されていません。"
+                }
+              ]
+            });
+          }
           targetShelter = shelters[0];
         }
 
@@ -1026,7 +1033,20 @@ async function handleEvent(event) {
         });
       }
 
-      // ② ゴール地点の登録 ＆ 計算
+      // ② ゴール地点の登録 ＆ 計算（修正版）
+      // 修正：status が WALKING であることを確認
+      if (session.status !== "WALKING") {
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text: "⚠️ 訓練の状態が正しくありません。「スタート」から再度開始してください。"
+            }
+          ]
+        });
+      }
+
       const endTime = session.goalTime || getJapanNowTimestamp();
       const goalLat = lat;
       const goalLng = lng;
@@ -1034,6 +1054,17 @@ async function handleEvent(event) {
       let targetShelter = session.targetShelter;
       if (!targetShelter) {
         const shelters = await getShelterList();
+        if (shelters.length === 0) {
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text: "申し訳ございません。避難所データが登録されていません。"
+              }
+            ]
+          });
+        }
         targetShelter = shelters[0];
       }
 
@@ -1098,15 +1129,18 @@ async function handleEvent(event) {
         `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
         `避難訓練お疲れ様でした！\n` +
         `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
-    
-      // ログ保存用のオブジェクト作成
+
+      // ログ保存用のオブジェクト作成（1つにまとめる）
       const logData = {
+        drillId: `drill_${Date.now()}_${userId.slice(-6)}`,
         userId,
         shelterId: targetShelter.id,
         shelterName: targetShelter.name,
-        shelterCity: targetShelter.city || "",
-        startTime: session.startTime,
-        endTime: endTime,
+        shelterCity: targetShelter.city || "熊谷市",
+        startTime: toJapanISOString(session.startTime),
+        startTimeMs: session.startTime,
+        endTime: toJapanISOString(endTime),
+        endTimeMs: endTime,
         elapsedSeconds: elapsedSeconds,
         startLat: session.startLocation.lat,
         startLng: session.startLocation.lng,
@@ -1117,19 +1151,10 @@ async function handleEvent(event) {
         remainingDistanceMeters: remainDist,
         isArrived: isArrived,
         achievementLevel: achievementLevel,
-        routeSource: walkedRoute.isRouteApi ? "ROUTES_API" : "STRAIGHT_LINE"
+        routeSource: walkedRoute.isRouteApi ? "GOOGLE_ROUTES_API" : "HAVERSINE_ESTIMATED"
       };
 
-      // Firestoreにログ保存 & セッション削除
-      await saveEvacuationLog(logData);
-      await deleteSession(userId);
-
-      return await client.replyMessage({
-        replyToken: event.replyToken,
-        messages: [{ type: "text", text: resultMessage }]
-      });
-
-      // ── ポイント計算とFirestore保存 ──
+      // ── ポイント計算 ──
       let addPoint = 0;
       let totalPoints = 0;
 
@@ -1151,49 +1176,23 @@ async function handleEvent(event) {
         if (elapsedSeconds < estimatedSeconds - 180) addPoint += 1;
 
         totalPoints = currentPoints + addPoint;
-
-        // 修正点：update ではなく set merge を使用（未作成ドキュメント対策）
         await userRef.set({ points: totalPoints }, { merge: true });
 
       } catch (e) {
         console.error("ポイント付与エラー:", e.message);
       }
 
-      // 研究用ログの保存
-      const drillLog = {
-        drillId: `drill_${Date.now()}_${userId.slice(-6)}`,
-        userId: userId,
-        shelterId: targetShelter.id,
-        shelterName: targetShelter.name,
-        shelterCity: targetShelter.city || "熊谷市",
-        startTime: toJapanISOString(session.startTime),
-        startTimeMs: session.startTime,
-        endTime: toJapanISOString(endTime),
-        endTimeMs: endTime,
-        elapsedSeconds: elapsedSeconds,
-        startLat: session.startLocation.lat,
-        startLng: session.startLocation.lng,
-        goalLat: goalLat,
-        goalLng: goalLng,
-        walkedDistanceMeters: walkedRoute.distanceMeters,
-        initialDistanceMeters: initialDist,
-        remainingDistanceMeters: remainDist,
-        isArrived: isArrived,
-        achievementLevel: achievementLevel,
-        routeSource: walkedRoute.isRouteApi ? "GOOGLE_ROUTES_API" : "HAVERSINE_ESTIMATED"
-      };
-      await saveEvacuationLog(drillLog);
-
+      // Firestoreにログ保存 & セッション削除
+      await saveEvacuationLog(logData);
       await deleteSession(userId);
 
-      // 修正点：pushMessage ではなく 1回の replyMessage にまとめて返信
+      // 修正点：1回の replyMessage にまとめて返信
       const responseMessages = [
         { type: "text", text: resultMessage },
         {
           type: "text",
           text: `🎁【ポイント獲得】\n今回の避難訓練で *${addPoint} pt* を獲得しました！\n\n現在の合計ポイント：${totalPoints} pt`
-        },
-        { type: "text", text: getHelpMessage() }
+        }
       ];
 
       return await client.replyMessage({
