@@ -967,7 +967,7 @@ async function handleEvent(event) {
     }
 
 
-  　}
+  　
 
       const lat = event.message.latitude;
       const lng = event.message.longitude;
@@ -1098,6 +1098,36 @@ async function handleEvent(event) {
         `🏁 ゴール地点: 北緯 ${goalLatStr}, 東経 ${goalLngStr}\n\n` +
         `避難訓練お疲れ様でした！\n` +
         `もう一度行う場合は「スタート」、過去の記録を見るには「履歴」と送信してください。`;
+    
+      // ログ保存用のオブジェクト作成
+      const logData = {
+        userId,
+        shelterId: targetShelter.id,
+        shelterName: targetShelter.name,
+        shelterCity: targetShelter.city || "",
+        startTime: session.startTime,
+        endTime: endTime,
+        elapsedSeconds: elapsedSeconds,
+        startLat: session.startLocation.lat,
+        startLng: session.startLocation.lng,
+        goalLat: goalLat,
+        goalLng: goalLng,
+        walkedDistanceMeters: walkedRoute.distanceMeters,
+        initialDistanceMeters: initialDist,
+        remainingDistanceMeters: remainDist,
+        isArrived: isArrived,
+        achievementLevel: achievementLevel,
+        routeSource: walkedRoute.isRouteApi ? "ROUTES_API" : "STRAIGHT_LINE"
+      };
+
+      // Firestoreにログ保存 & セッション削除
+      await saveEvacuationLog(logData);
+      await deleteSession(userId);
+
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [{ type: "text", text: resultMessage }]
+      });
 
       // ── ポイント計算とFirestore保存 ──
       let addPoint = 0;
