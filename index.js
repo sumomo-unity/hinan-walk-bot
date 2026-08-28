@@ -737,192 +737,220 @@ async function handleEvent(event) {
       return null;
     }
 
-    // 2. テキストメッセージ処理
-    if (event.type === "message" && event.message.type === "text") {
-      const text = event.message.text.trim();
+   // 2. テキストメッセージ処理
+if (event.type === "message" && event.message.type === "text") {
+  const text = event.message.text.trim();
 
-      // A. 「スタート」
-      if (text === "スタート" || text === "開始" || text === "避難訓練") {
-        await deleteSession(userId);
-        const shelters = await getShelterList();
+  // A. 「スタート」コマンド（どの状態からでも訓練を開始できる）
+  if (text === "スタート" || text === "開始" || text === "避難訓練") {
+    await deleteSession(userId);
+    const shelters = await getShelterList();
 
+    // 必要に応じて避難所選択待ちのセッションを保存
+    // await saveSession(userId, { status: "WAITING_SHELTER_SELECT" });
+
+    return await client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [
+        {
+          type: "text",
+          text:
+            "🚨 避難ウォーク訓練を開始します！\n" +
+            "※本Botは避難訓練専用です。個別のお問い合わせには対応しておりません。\n\n" +
+            "まずは目指す【目標避難所】を以下の一覧から選択してください。"
+        },
+        createShelterFlex(shelters)
+      ]
+    });
+  }
+
+  // B. 訓練中のテキストコマンド処理
+  if (session) {
+    // リセット
+    if (text === "リセット" || text === "中止" || text === "キャンセル") {
+      await deleteSession(userId);
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              "避難訓練の記録をリセットしました。\n新しく訓練を始めるには「スタート」と送信してください。"
+          }
+        ]
+      });
+    }
+
+    // ゴール
+    if (text === "ゴール" || text === "到着" || text === "避難完了" || text === "終了") {
+      if (!session.startLocation || !session.startTimeMs) {
         return await client.replyMessage({
           replyToken: event.replyToken,
           messages: [
             {
               type: "text",
               text:
-                "🚨 避難ウォーク訓練を開始します！\n" +
-                "※本Botは避難訓練専用です。個別のお問い合わせには対応しておりません。\n\n" +
-                "まずは目指す【目標避難所】を以下の一覧から選択してください。"
-            },
-            createShelterFlex(shelters)
+                "避難訓練がまだスタートしていません。\n" +
+                "LINEの「＋」ボタンからスタート地点の【位置情報】を送信してください。"
+            }
           ]
         });
       }
 
-      // B. 訓練中のテキストコマンド
-      if (session) {
-        // リセット
-        if (text === "リセット" || text === "中止" || text === "キャンセル") {
-          await deleteSession(userId);
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [
-              {
-                type: "text",
-                text:
-                  "避難訓練の記録をリセットしました。\n新しく訓練を始めるには「スタート」と送信してください。"
-              }
-            ]
-          });
-        }
+      session.goalTime = getJapanNowTimestamp();
+      session.status = "WAITING_GOAL_LOCATION";
+      await saveSession(userId, session);
 
-        // ゴール
-        if (text === "ゴール" || text === "到着" || text === "避難完了" || text === "終了") {
-          if (!session.startLocation || !session.startTimeMs) {
-            return await client.replyMessage({
-              replyToken: event.replyToken,
-              messages: [
-                {
-                  type: "text",
-                  text:
-                    "避難訓練がまだスタートしていません。\n" +
-                    "LINEの「＋」ボタンからスタート地点の【位置情報】を送信してください。"
-                }
-              ]
-            });
+      const goalTimeStr = formatJapanTime(session.goalTime);
+
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              `🏁 ゴール時刻（${goalTimeStr}）を記録しました！\n\n` +
+              "避難時間と移動距離を計算しますので、LINE画面左下の「＋」ボタンから現在の【位置情報】を送信してください。"
           }
-
-          session.goalTime = getJapanNowTimestamp();
-          session.status = "WAITING_GOAL_LOCATION";
-          await saveSession(userId, session);
-
-          const goalTimeStr = formatJapanTime(session.goalTime);
-
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [
-              {
-                type: "text",
-                text:
-                  `🏁 ゴール時刻（${goalTimeStr}）を記録しました！\n\n` +
-                  "避難時間と移動距離を計算しますので、LINE画面左下の「＋」ボタンから現在の【位置情報】を送信してください。"
-              }
-            ]
-          });
-        }
-
-        // 使い方
-        if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: getHelpMessage() }]
-          });
-        }
-
-        return null;
-      }
-
-      // C. 訓練前の避難所機能
-      if (!session) {
-        // 避難所一覧
-        if (text === "避難所") {
-          const shelters = await getShelterList();
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [
-              {
-                type: "text",
-                text: "📍 登録されている避難所の一覧です。\n地図リンクから場所を確認できます。"
-              },
-              createShelterFlex(shelters)
-            ]
-          });
-        }
-
-        // 避難所詳細（避難所 ○○）
-        if (text.startsWith("避難所 ")) {
-          const name = text.replace("避難所 ", "").trim();
-          const shelters = await getShelterList();
-          const shelter = shelters.find((s) => s.name === name);
-
-          if (!shelter) {
-            return await client.replyMessage({
-              replyToken: event.replyToken,
-              messages: [{ type: "text", text: `「${name}」という避難所は見つかりませんでした。` }]
-            });
-          }
-
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [
-              {
-                type: "text",
-                text:
-                  `🏢 ${shelter.name}\n` +
-                  `📍 住所: ${shelter.address}\n` +
-                  `🌐 座標: ${shelter.lat}, ${shelter.lng}\n\n` +
-                  `地図: https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`
-              }
-            ]
-          });
-        }
-      }
-
-      // 共通「使い方」
-      if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [{ type: "text", text: getHelpMessage() }]
-        });
-      }
-
-      // 履歴
-      if (text === "履歴" || text === "りれき" || text === "記録" || text === "history") {
-        const history = await getUserHistory(userId, 5);
-        if (!history || history.length === 0) {
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [
-              {
-                type: "text",
-                text:
-                  "📋 過去の避難訓練記録はまだありません。\n「スタート」と送信して避難訓練を開始しましょう！"
-              }
-            ]
-          });
-        }
-
-        let historyMsg = "📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n";
-        history.forEach((h, idx) => {
-          const startTimestamp =
-            typeof h.startTime === "number" ? h.startTime : new Date(h.startTime).getTime();
-          const dateStr = formatJapanDate(startTimestamp);
-
-          const mins = Math.floor((h.elapsedSeconds || 0) / 60);
-          const secs = (h.elapsedSeconds || 0) % 60;
-          const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
-          const distStr = formatDistance(h.walkedDistanceMeters || 0);
-          const statusIcon = h.isArrived ? "🎉 到着" : "🏁 途中終了";
-
-          historyMsg +=
-            `[第${idx + 1}回] ${dateStr}\n` +
-            `🏢 ${h.shelterName || "避難所"}\n` +
-            `⏱️ 避難時間: ${timeStr} / 🚶 移動距離: ${distStr}\n` +
-            `結果: ${statusIcon}\n` +
-            `──────────────────\n`;
-        });
-        historyMsg += "訓練を新しく始めるには「スタート」と送信してください。";
-
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [{ type: "text", text: historyMsg }]
-        });
-      }
-
-      return null;
+        ]
+      });
     }
+
+    // 使い方・ヘルプ
+    if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [{ type: "text", text: getHelpMessage() }]
+      });
+    }
+
+    // 訓練中に認識できないテキストが送られてきた場合のフォールバック応答（サイレント無視の防止）
+    return await client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [
+        {
+          type: "text",
+          text:
+            "現在、避難訓練の計測中です。\n\n" +
+            "・ゴールする場合は「ゴール」と送信\n" +
+            "・やり直す場合は「リセット」と送信してください。"
+        }
+      ]
+    });
+  }
+
+  // C. 訓練前の避難所・履歴機能（session が存在しない場合のみ実行）
+
+  // 避難所一覧
+  if (text === "避難所") {
+    const shelters = await getShelterList();
+    return await client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [
+        {
+          type: "text",
+          text: "📍 登録されている避難所の一覧です。\n地図リンクから場所を確認できます。"
+        },
+        createShelterFlex(shelters)
+      ]
+    });
+  }
+
+  // 避難所詳細（部分一致検索に改修して利便性を向上）
+  if (text.startsWith("避難所 ")) {
+    const name = text.replace("避難所 ", "").trim();
+    const shelters = await getShelterList();
+    const shelter = shelters.find((s) => s.name.includes(name));
+
+    if (!shelter) {
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [{ type: "text", text: `「${name}」に一致する避難所は見つかりませんでした。` }]
+      });
+    }
+
+    return await client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [
+        {
+          type: "text",
+          text:
+            `🏢 ${shelter.name}\n` +
+            `📍 住所: ${shelter.address}\n` +
+            `🌐 座標: ${shelter.lat}, ${shelter.lng}\n\n` +
+            `地図: https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`
+        }
+      ]
+    });
+  }
+
+  // 使い方・ヘルプ（訓練前）
+  if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
+    return await client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: "text", text: getHelpMessage() }]
+    });
+  }
+
+  // 履歴表示
+  if (text === "履歴" || text === "りれき" || text === "記録" || text === "history") {
+    const history = await getUserHistory(userId, 5);
+    if (!history || history.length === 0) {
+      return await client.replyMessage({
+        replyToken: event.replyToken,
+        messages: [
+          {
+            type: "text",
+            text:
+              "📋 過去の避難訓練記録はまだありません。\n「スタート」と送信して避難訓練を開始しましょう！"
+          }
+        ]
+      });
+    }
+
+    let historyMsg = "📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n";
+    history.forEach((h, idx) => {
+      const startTimestamp =
+        typeof h.startTime === "number" ? h.startTime : new Date(h.startTime).getTime();
+      const dateStr = formatJapanDate(startTimestamp);
+
+      const mins = Math.floor((h.elapsedSeconds || 0) / 60);
+      const secs = (h.elapsedSeconds || 0) % 60;
+      const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
+      const distStr = formatDistance(h.walkedDistanceMeters || 0);
+      const statusIcon = h.isArrived ? "🎉 到着" : "🏁 途中終了";
+
+      historyMsg +=
+        `[第${idx + 1}回] ${dateStr}\n` +
+        `🏢 ${h.shelterName || "避難所"}\n` +
+        `⏱️ 避難時間: ${timeStr} / 🚶 移動距離: ${distStr}\n` +
+        `結果: ${statusIcon}\n` +
+        `──────────────────\n`;
+    });
+    historyMsg += "訓練を新しく始めるには「スタート」と送信してください。";
+
+    return await client.replyMessage({
+      replyToken: event.replyToken,
+      messages: [{ type: "text", text: historyMsg }]
+    });
+  }
+
+  // 訓練前にどの条件にも一致しないコマンドが入力された場合の案内メッセージ
+  return await client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text:
+          "メッセージありがとうございます。\n\n" +
+          "【ご利用方法】\n" +
+          "・「スタート」: 避難訓練を開始します\n" +
+          "・「避難所」: 登録されている避難所一覧を表示します\n" +
+          "・「履歴」: 過去の訓練結果を表示します"
+      }
+    ]
+  });
+}
 
    // 3. 位置情報メッセージ処理
 if (event.type === "message" && event.message.type === "location") {
