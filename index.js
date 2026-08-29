@@ -326,7 +326,7 @@ function isValidJapanCoordinate(lat, lng) {
   return lat >= 20.0 && lat <= 46.0 && lng >= 122.0 && lng <= 154.0;
 }
 
-// ── 8. 距離・時間計算 & Google Maps Routes API ──
+// ── 8. 距離・時間計算（Routes API ＆ Directions API 二重対応） ──
 function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -346,16 +346,14 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
 
   if (apiKey) {
+    // 1. Google Maps Routes API (最新版) を試行
     try {
-      const url = new URL("https://routes.googleapis.com/directions/v2:computeRoutes");
-      url.searchParams.append("key", apiKey);
-
-      const response = await fetch(url.toString(), {
+      const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
-          "X-Goog-Maps-Solution-ID": "gmp_git_agentskills_v1"
+          "X-Goog-Api-Key": apiKey,
+          "X-Goog-FieldMask": "routes.duration,routes.distanceMeters"
         },
         body: JSON.stringify({
           origin: {
@@ -396,16 +394,41 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
         }
       } else {
         const errorText = await response.text();
-        console.warn(`Routes API HTTP ${response.status}:`, errorText);
+        console.warn(`Routes API 返答エラー HTTP ${response.status}:`, errorText);
       }
     } catch (err) {
-      console.warn("Routes API fetch failed:", {
-        message: err.message,
-        hasApiKey: !!config.googleMapsApiKey
-      });
+      console.warn("Routes API 接続エラー:", err.message);
     }
+
+    // 2. Directions API (従来のAPI) でリトライ
+    try {
+      const dirUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${originLat},${originLng}&destination=${destLat},${destLng}&mode=walking&key=${apiKey}`;
+      const dirResponse = await fetch(dirUrl);
+      if (dirResponse.ok) {
+        const dirData = await dirResponse.json();
+        if (dirData.status === "OK" && dirData.routes && dirData.routes.length > 0) {
+          const leg = dirData.routes[0].legs[0];
+          const distanceMeters = leg.distance ? leg.distance.value : 0;
+          const durationSeconds = leg.duration ? leg.duration.value : Math.round(distanceMeters / 1.33);
+
+          return {
+            distanceMeters,
+            durationSeconds,
+            isRouteApi: true,
+            notice: ""
+          };
+        } else {
+          console.warn(`Directions API ステータスエラー: ${dirData.status}`, dirData.error_message || "");
+        }
+      }
+    } catch (dirErr) {
+      console.warn("Directions API 接続エラー:", dirErr.message);
+    }
+  } else {
+    console.warn("⚠️ Google Maps API Key (GOOGLE_MAPS_API_KEY) が設定されていません。");
   }
 
+  // 3. 全て失敗した場合のフォールバック: 直線距離 × 1.25 & 分速80m
   const straightDist = calculateHaversineDistance(originLat, originLng, destLat, destLng);
   const estimatedWalkingDist = Math.round(straightDist * 1.25);
   const estimatedSeconds = Math.round((estimatedWalkingDist / 80) * 60);
