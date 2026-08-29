@@ -85,7 +85,8 @@ function getHelpMessage() {
     "・目標まで残り 500m 以内: +1 pt\n" +
     "・目標まで残り 300m 以内: さらに +1 pt (計 2 pt)\n" +
     "・ゴール到達（50m 以内）: さらに +3 pt (計 5 pt)\n" +
-    "・急勾配／坂道ルート踏破: +1 pt\n\n" +
+    "・急勾配／坂道ルート踏破: +1 pt\n" +
+    "※ポイントは訓練ごとに計算され、次回も0ptから開始されます。\n\n" +
     "※本Botは避難訓練・経路確認を目的としたツールです。実際の災害時には自治体の指示に従ってください。\n"
   );
 }
@@ -828,7 +829,7 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // A. 「スタート」コマンド
+      // A. 「スタート」コマンド（過去のセッションを破棄し、常に 0 から新規開始）
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
         const shelters = await getShelterList();
@@ -1003,7 +1004,7 @@ async function handleEvent(event) {
           const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
           const distStr = formatDistance(h.walkedDistanceMeters || 0);
           const statusIcon = h.isArrived ? "🎉 到着" : "🏁 途中終了";
-          const ptStr = h.pointsEarned ? ` (+${h.pointsEarned}pt)` : "";
+          const ptStr = h.pointsEarned !== undefined ? ` (+${h.pointsEarned}pt)` : "";
 
           historyMsg +=
             `[第${idx + 1}回] ${dateStr}\n` +
@@ -1178,22 +1179,19 @@ async function handleEvent(event) {
           pointDetails.push(`急勾配・難所ルート踏破 (+1pt / 標高差約${elevationInfo.elevationGain}m)`);
         }
 
-        // Firestore のユーザードキュメントに累計ポイントを加算
-        if (pointsEarned > 0) {
-          try {
-            const userRef = db.collection("users").doc(userId);
-            const userDoc = await userRef.get();
-            const currentPoints = userDoc.exists ? userDoc.data().points || 0 : 0;
-            await userRef.set(
-              {
-                points: currentPoints + pointsEarned,
-                lastDrillAt: FieldValue.serverTimestamp()
-              },
-              { merge: true }
-            );
-          } catch (e) {
-            console.error("Point update error:", e.message);
-          }
+        // Firestore の users コレクションを 0 にリセット（次回も 0 から開始）
+        try {
+          const userRef = db.collection("users").doc(userId);
+          await userRef.set(
+            {
+              points: 0, // ポイントを0にリセット
+              lastEarnedPoints: pointsEarned,
+              lastDrillAt: FieldValue.serverTimestamp()
+            },
+            { merge: true }
+          );
+        } catch (e) {
+          console.error("User reset error:", e.message);
         }
 
         const drillId = `${userId}_${Date.now()}`;
@@ -1222,16 +1220,17 @@ async function handleEvent(event) {
         };
 
         await saveEvacuationLog(logData);
-        await deleteSession(userId);
+        await deleteSession(userId); // セッション削除
 
         const statusMsg = isArrived
           ? `🎉 目標避難所「${shelter.name}」に無事到着しました！（残距離 ${Math.round(remainingMeters)}m）`
           : `🏁 避難計測を終了しました。（目標まであと ${formatDistance(remainingMeters)}）`;
 
-        const pointMsg =
-          pointsEarned > 0
-            ? `\n🎁 【獲得ポイント: +${pointsEarned} pt】\n` + pointDetails.map((d) => `・${d}`).join("\n")
-            : "";
+        // 獲得ポイントと内訳の表示メッセージ
+        let pointMsg = `🏆 今回の獲得ポイント: ${pointsEarned} pt\n`;
+        if (pointDetails.length > 0) {
+          pointMsg += `\n【ポイント内訳】\n` + pointDetails.map((d) => `・${d}`).join("\n") + "\n";
+        }
 
         return await client.replyMessage({
           replyToken: event.replyToken,
@@ -1243,7 +1242,9 @@ async function handleEvent(event) {
                 `${statusMsg}\n\n` +
                 `⏱️ 避難時間: ${timeStr}\n` +
                 `🚶 移動距離: ${formatDistance(walkedRoute.distanceMeters)}\n` +
-                `${pointMsg}\n\n` +
+                `${pointMsg}` +
+                `━━━━━━━━━━━━━━\n` +
+                `※ポイントは訓練ごとにリセットされ、次回も0ptから開始されます。\n\n` +
                 `おつかれさまでした！日頃からの備えと経路の確認を心がけましょう。`
             }
           ]
