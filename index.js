@@ -76,7 +76,7 @@ function getHelpMessage() {
     "🔹「ポイント」／「残高」\n" +
     "現在の保有ポイント残高を確認できます。\n\n" +
     "🔹「ポイント使用」／「ポイント利用」\n" +
-    "商店街の加盟店でポイントを利用します。画面の案内に従って使いたいポイント数を入力してください。\n\n" +
+    "店舗のQRコードリーダーが起動します。店頭のQRコードをスキャンしてポイントをご利用ください。\n\n" +
     "🔹「避難所」\n" +
     "登録避難所一覧を表示します。\n\n" +
     "🔹「履歴」\n" +
@@ -1026,7 +1026,7 @@ async function handleEvent(event) {
           });
         }
 
-        // ポイント利用キャンセル
+        // ポイント利用キャンセル（QRコード読み取り前・入力中・確認中すべて対応）
         if (data.action === "cancel_use_point") {
           await deletePointSession(userId);
           return await client.replyMessage({
@@ -1044,7 +1044,65 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // ── A. ポイント利用中の対話処理（ポイント数入力待ち時） ──
+      // ── A. 店舗QRコード読み取り成功時の処理（例: 「店舗_001」や「shop_xxx」） ──
+      if (
+        text.startsWith("店舗_") ||
+        text.startsWith("店舗QR_") ||
+        text.startsWith("shop_") ||
+        text.startsWith("SHOP_")
+      ) {
+        const shopId = text.replace(/^(店舗_|店舗QR_|shop_|SHOP_)/, "").trim() || "商店街加盟店";
+        const currentPoints = await getUserPoints(userId);
+
+        if (currentPoints <= 0) {
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  `🏪 店舗【${shopId}】を認識しました。\n\n` +
+                  "🪙 現在利用できるポイントがありません（残高: 0 pt）。\n" +
+                  "避難訓練を実施してポイントを獲得しましょう！"
+              }
+            ]
+          });
+        }
+
+        // ポイント数入力待ちセッションを保存
+        await savePointSession(userId, {
+          status: "WAITING_POINT_AMOUNT",
+          shopId: shopId
+        });
+
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🏪 店舗【${shopId}】のQRコードを読み取りました！\n` +
+                `🪙 現在の保有ポイント: ${currentPoints} pt\n\n` +
+                `何ポイント使用しますか？\n使いたいポイント数を半角数字で入力してください。（例: 100）`,
+              quickReply: {
+                items: [
+                  {
+                    type: "action",
+                    action: {
+                      type: "postback",
+                      label: "❌ キャンセル",
+                      data: JSON.stringify({ action: "cancel_use_point" }),
+                      displayText: "キャンセル"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        });
+      }
+
+      // ── B. ポイント利用中の対話処理（ポイント数入力待ち時） ──
       if (pointSession && pointSession.status === "WAITING_POINT_AMOUNT") {
         if (text === "キャンセル" || text === "やめる" || text === "中止") {
           await deletePointSession(userId);
@@ -1085,7 +1143,7 @@ async function handleEvent(event) {
           });
         }
 
-        // 入力値が保有ポイントを上回っている場合（エラーメッセージ ＆ 再入力待機）
+        // 入力値が保有ポイントを上回っている場合（エラー表示 ＆ 再入力待機）
         if (inputPoints > currentPoints) {
           return await client.replyMessage({
             replyToken: event.replyToken,
@@ -1213,12 +1271,12 @@ async function handleEvent(event) {
         });
       }
 
-      // ── B. 「ポイント使用」コマンド（ポイント利用の開始） ──
+      // ── C. 「ポイント使用」入力時のQRリーダー起動画面 ──
       if (
-        text.startsWith("ポイント使用") ||
-        text.startsWith("ポイント利用") ||
-        text.startsWith("ポイントを使う") ||
-        (text.startsWith("ポイント") && (text.includes("使") || text.includes("払")))
+        text === "ポイント使用" ||
+        text === "ポイント利用" ||
+        text === "ポイントを使う" ||
+        text === "ポイント払い"
       ) {
         const currentPoints = await getUserPoints(userId);
 
@@ -1236,48 +1294,91 @@ async function handleEvent(event) {
           });
         }
 
-        // 店舗IDの抽出（例: 「ポイント使用 shop001」）
-        const parts = text.split(/\s+/);
-        let shopId = "商店街加盟店";
-        if (parts.length >= 2 && isNaN(parseInt(parts[1], 10))) {
-          shopId = parts[1];
-        }
-
-        // 対話セッションを「ポイント数入力待ち」に保存
+        // QR読み取り待機セッションを保存
         await savePointSession(userId, {
-          status: "WAITING_POINT_AMOUNT",
-          shopId: shopId
+          status: "WAITING_QR_SCAN"
         });
 
         return await client.replyMessage({
           replyToken: event.replyToken,
           messages: [
             {
-              type: "text",
-              text:
-                `🪙 【商店街ポイント利用】\n━━━━━━━━━━━━━━\n` +
-                `現在の保有残高: ${currentPoints} pt\n\n` +
-                `使いたいポイント数を半角数字で入力して送信してください。\n` +
-                `（例: 50、100、${currentPoints}）`,
-              quickReply: {
-                items: [
-                  {
-                    type: "action",
-                    action: {
-                      type: "postback",
-                      label: "❌ キャンセル",
-                      data: JSON.stringify({ action: "cancel_use_point" }),
-                      displayText: "キャンセル"
+              type: "flex",
+              altText: "店舗QRコード読み取り",
+              contents: {
+                type: "bubble",
+                size: "kilo",
+                header: {
+                  type: "box",
+                  layout: "vertical",
+                  backgroundColor: "#27ae60",
+                  contents: [
+                    {
+                      type: "text",
+                      text: "📷 店舗QRコードの読み取り",
+                      color: "#ffffff",
+                      weight: "bold",
+                      size: "sm"
                     }
-                  }
-                ]
+                  ]
+                },
+                body: {
+                  type: "box",
+                  layout: "vertical",
+                  spacing: "sm",
+                  contents: [
+                    {
+                      type: "text",
+                      text: `🪙 現在の保有ポイント: ${currentPoints} pt`,
+                      size: "sm",
+                      weight: "bold",
+                      color: "#2c3e50"
+                    },
+                    {
+                      type: "text",
+                      text: "店頭に設置されているQRコードを読み取ってください。",
+                      size: "xs",
+                      color: "#666666",
+                      wrap: true
+                    }
+                  ]
+                },
+                footer: {
+                  type: "box",
+                  layout: "vertical",
+                  spacing: "sm",
+                  contents: [
+                    {
+                      type: "button",
+                      style: "primary",
+                      color: "#27ae60",
+                      height: "sm",
+                      action: {
+                        type: "uri",
+                        label: "📷 QRコードを読み取る",
+                        uri: "https://line.me/R/nv/QRCodeReader"
+                      }
+                    },
+                    {
+                      type: "button",
+                      style: "secondary",
+                      height: "sm",
+                      action: {
+                        type: "postback",
+                        label: "❌ キャンセル",
+                        data: JSON.stringify({ action: "cancel_use_point" }),
+                        displayText: "キャンセル"
+                      }
+                    }
+                  ]
+                }
               }
             }
           ]
         });
       }
 
-      // ── C. 「ポイント確認」コマンド ──
+      // ── D. 「ポイント確認」コマンド ──
       if (
         text === "ポイント" ||
         text === "ポイント確認" ||
@@ -1302,7 +1403,7 @@ async function handleEvent(event) {
         });
       }
 
-      // ── D. 「スタート」コマンド ──
+      // ── E. 「スタート」コマンド ──
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
         await deletePointSession(userId);
@@ -1323,7 +1424,7 @@ async function handleEvent(event) {
         });
       }
 
-      // ── E. 訓練中のテキストコマンド処理 ──
+      // ── F. 訓練中のテキストコマンド処理 ──
       if (session) {
         // リセット
         if (text === "リセット" || text === "中止" || text === "キャンセル") {
@@ -1398,7 +1499,7 @@ async function handleEvent(event) {
         });
       }
 
-      // ── F. 訓練前の避難所・履歴・案内 ──
+      // ── G. 訓練前の避難所・履歴・案内 ──
 
       // 避難所一覧
       if (text === "避難所") {
