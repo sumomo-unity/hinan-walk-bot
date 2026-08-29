@@ -20,6 +20,7 @@ const client = new line.messagingApi.MessagingApiClient({
 // メモリ保持用フォールバック
 const memorySessions = new Map();
 const memoryLogs = [];
+const memoryUserTotalPoints = new Map(); // 累計ポイント用メモリマップ
 
 // ── 2. タイムゾーン対応関数 ──
 function getJapanNowTimestamp() {
@@ -70,7 +71,7 @@ function getHelpMessage() {
     "🔹「スタート」（訓練中に送信）\n" +
     "訓練の途中でも、もう一度「スタート」と送信すると記録をリセットして最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・獲得ポイントが表示されます。\n\n" +
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・今回獲得＆累計ポイントが表示されます。\n\n" +
     "🔹「リセット」／「中止」／「キャンセル」\n" +
     "現在の避難訓練の記録をすべて削除し、訓練を中止します。再開する場合は「スタート」と送信してください。\n\n" +
     "🔹「避難所」\n" +
@@ -78,7 +79,7 @@ function getHelpMessage() {
     "🔹「避難所 ○○」\n" +
     "特定の避難所名（例：「避難所 熊谷市役所」）を入力すると、その避難所の住所や座標、地図リンクを表示します。\n\n" +
     "🔹「履歴」\n" +
-    "過去の避難訓練の記録（直近5件）を一覧で表示します。\n\n" +
+    "過去の避難訓練の記録（直近5件）および現在の累計ポイントを表示します。\n\n" +
     "🔹「使い方」／「ヘルプ」／「help」\n" +
     "この説明をもう一度表示します。\n\n" +
     "🏆 【ポイント獲得ルール】\n" +
@@ -86,7 +87,7 @@ function getHelpMessage() {
     "・目標まで残り 300m 以内: さらに +1 pt (計 2 pt)\n" +
     "・ゴール到達（50m 以内）: さらに +3 pt (計 5 pt)\n" +
     "・急勾配／坂道ルート踏破: +1 pt\n" +
-    "※ポイントは訓練ごとに計算され、次回も0ptから開始されます。\n\n" +
+    "※獲得したポイントは【累計ポイント】としてずっと加算され続けます。\n\n" +
     "※本Botは避難訓練・経路確認を目的としたツールです。実際の災害時には自治体の指示に従ってください。\n"
   );
 }
@@ -161,6 +162,19 @@ async function getUserHistory(userId, limitCount = 5) {
     .filter((l) => l.userId === userId)
     .sort((a, b) => new Date(b.startTime) - new Date(a.startTime))
     .slice(0, limitCount);
+}
+
+// ユーザーの最新累計ポイントを取得する関数
+async function getUserTotalPoints(userId) {
+  try {
+    const userDoc = await db.collection("users").doc(userId).get();
+    if (userDoc.exists) {
+      return userDoc.data().totalPoints || 0;
+    }
+  } catch (e) {
+    console.error("Firestore getUserTotalPoints error:", e.message);
+  }
+  return memoryUserTotalPoints.get(userId) || 0;
 }
 
 // ── 6. 避難所マスタ取得（Firestore shelters コレクション） ──
@@ -671,6 +685,7 @@ app.get("/export/csv", async (req, res) => {
       "remainingDistanceMeters",
       "isArrived",
       "pointsEarned",
+      "totalPointsAfterDrill",
       "hasSteepSlope",
       "achievementLevel",
       "routeSource"
@@ -695,6 +710,7 @@ app.get("/export/csv", async (req, res) => {
       l.remainingDistanceMeters || 0,
       l.isArrived ? "TRUE" : "FALSE",
       l.pointsEarned || 0,
+      l.totalPointsAfterDrill || 0,
       l.hasSteepSlope ? "TRUE" : "FALSE",
       l.achievementLevel || "",
       l.routeSource || ""
@@ -829,7 +845,7 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // A. 「スタート」コマンド（過去のセッションを破棄し、常に 0 から新規開始）
+      // A. 「スタート」コマンド（過去のセッションを破棄し、新しい訓練を開始）
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
         const shelters = await getShelterList();
@@ -979,7 +995,11 @@ async function handleEvent(event) {
 
       // 履歴表示
       if (text === "履歴" || text === "りれき" || text === "記録" || text === "history") {
-        const history = await getUserHistory(userId, 5);
+        const [history, currentTotalPoints] = await Promise.all([
+          getUserHistory(userId, 5),
+          getUserTotalPoints(userId)
+        ]);
+
         if (!history || history.length === 0) {
           return await client.replyMessage({
             replyToken: event.replyToken,
@@ -987,13 +1007,17 @@ async function handleEvent(event) {
               {
                 type: "text",
                 text:
+                  `🌟 現在の累計ポイント: ${currentTotalPoints} pt\n\n` +
                   "📋 過去の避難訓練記録はまだありません。\n「スタート」と送信して避難訓練を開始しましょう！"
               }
             ]
           });
         }
 
-        let historyMsg = "📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n";
+        let historyMsg =
+          `🌟 現在の累計ポイント: ${currentTotalPoints} pt\n\n` +
+          `📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n`;
+
         history.forEach((h, idx) => {
           const startTimestamp =
             typeof h.startTime === "number" ? h.startTime : new Date(h.startTime).getTime();
@@ -1032,7 +1056,7 @@ async function handleEvent(event) {
               "【ご利用方法】\n" +
               "・「スタート」: 避難訓練を開始します\n" +
               "・「避難所」: 登録されている避難所一覧を表示します\n" +
-              "・「履歴」: 過去の訓練結果を表示します\n" +
+              "・「履歴」: 過去の訓練結果と累計ポイントを表示します\n" +
               "・「使い方」: 操作説明を表示します"
           }
         ]
@@ -1150,50 +1174,61 @@ async function handleEvent(event) {
         const directDistToShelter = calculateHaversineDistance(lat, lng, shelter.lat, shelter.lng);
         const remainingMeters = Math.min(directDistToShelter, remRoute.distanceMeters);
 
-        // ── ポイント判定ロジック ──
+        // ── 1. 今回の獲得ポイント計算 ──
         let pointsEarned = 0;
         const pointDetails = [];
 
-        // 1. 500m以内圏内 (+1 pt)
+        // ① 500m以内圏内 (+1 pt)
         if (remainingMeters <= 500) {
           pointsEarned += 1;
           pointDetails.push("500m圏内接近 (+1pt)");
         }
 
-        // 2. 300m以内圏内 (さらに +1 pt)
+        // ② 300m以内圏内 (さらに +1 pt)
         if (remainingMeters <= 300) {
           pointsEarned += 1;
           pointDetails.push("300m圏内接近 (+1pt)");
         }
 
-        // 3. ゴール（50m以内到達） (さらに +3 pt)
+        // ③ ゴール（50m以内到達） (さらに +3 pt)
         const isArrived = remainingMeters <= 50;
         if (isArrived) {
           pointsEarned += 3;
           pointDetails.push("避難所ゴール到達 (+3pt)");
         }
 
-        // 4. 急勾配・坂道ルート踏破ボーナス (+1 pt)
+        // ④ 急勾配・坂道ルート踏破ボーナス (+1 pt)
         if (elevationInfo.hasSteepSlope) {
           pointsEarned += 1;
           pointDetails.push(`急勾配・難所ルート踏破 (+1pt / 標高差約${elevationInfo.elevationGain}m)`);
         }
 
-        // Firestore の users コレクションを 0 にリセット（次回も 0 から開始）
+        // ── 2. 新しい変数「totalPoints（累計ポイント）」に加算して保存 ──
+        let totalPoints = 0;
         try {
           const userRef = db.collection("users").doc(userId);
+          const userDoc = await userRef.get();
+          const currentTotal = userDoc.exists ? userDoc.data().totalPoints || 0 : 0;
+
+          // 累計ポイントを加算更新
+          totalPoints = currentTotal + pointsEarned;
+
           await userRef.set(
             {
-              points: 0, // ポイントを0にリセット
+              totalPoints: totalPoints, // 累計ポイント（消えずに蓄積）
               lastEarnedPoints: pointsEarned,
               lastDrillAt: FieldValue.serverTimestamp()
             },
             { merge: true }
           );
         } catch (e) {
-          console.error("User reset error:", e.message);
+          console.error("Total point update error:", e.message);
+          const currentTotal = memoryUserTotalPoints.get(userId) || 0;
+          totalPoints = currentTotal + pointsEarned;
+          memoryUserTotalPoints.set(userId, totalPoints);
         }
 
+        // ── 3. ログ保存 & 今回のセッション破棄（次回用ポイントは0からスタート） ──
         const drillId = `${userId}_${Date.now()}`;
         const logData = {
           drillId,
@@ -1213,6 +1248,7 @@ async function handleEvent(event) {
           remainingDistanceMeters: Math.round(remainingMeters),
           isArrived,
           pointsEarned,
+          totalPointsAfterDrill: totalPoints, // 終了時点の累計ポイント
           hasSteepSlope: elevationInfo.hasSteepSlope,
           elevationGain: elevationInfo.elevationGain,
           achievementLevel: isArrived ? "GOAL" : remainingMeters <= 300 ? "NEAR_300M" : remainingMeters <= 500 ? "NEAR_500M" : "PARTIAL",
@@ -1220,14 +1256,14 @@ async function handleEvent(event) {
         };
 
         await saveEvacuationLog(logData);
-        await deleteSession(userId); // セッション削除
+        await deleteSession(userId); // セッション削除（次回訓練時は0から加算開始）
 
         const statusMsg = isArrived
           ? `🎉 目標避難所「${shelter.name}」に無事到着しました！（残距離 ${Math.round(remainingMeters)}m）`
           : `🏁 避難計測を終了しました。（目標まであと ${formatDistance(remainingMeters)}）`;
 
         // 獲得ポイントと内訳の表示メッセージ
-        let pointMsg = `🏆 今回の獲得ポイント: ${pointsEarned} pt\n`;
+        let pointMsg = `🏆 今回の獲得ポイント: +${pointsEarned} pt\n`;
         if (pointDetails.length > 0) {
           pointMsg += `\n【ポイント内訳】\n` + pointDetails.map((d) => `・${d}`).join("\n") + "\n";
         }
@@ -1244,7 +1280,8 @@ async function handleEvent(event) {
                 `🚶 移動距離: ${formatDistance(walkedRoute.distanceMeters)}\n` +
                 `${pointMsg}` +
                 `━━━━━━━━━━━━━━\n` +
-                `※ポイントは訓練ごとにリセットされ、次回も0ptから開始されます。\n\n` +
+                `🌟 現在の累計ポイント: ${totalPoints} pt\n` +
+                `（※今回の獲得分が加算されました。次回の訓練も0ptから開始されます。）\n\n` +
                 `おつかれさまでした！日頃からの備えと経路の確認を心がけましょう。`
             }
           ]
