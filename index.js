@@ -124,7 +124,7 @@ async function deleteSession(userId) {
   memorySessions.delete(userId);
 }
 
-// ポイント利用セッション（ポイント入力〜確認の対話管理）
+// ポイント利用対話セッション
 async function getPointSession(userId) {
   try {
     const doc = await db.collection("point_sessions").doc(userId).get();
@@ -769,7 +769,7 @@ app.post("/webhook", line.middleware(config), (req, res) => {
     });
 });
 
-// B. 商店街 店舗QR用 エンドポイント（QR読み取り時にLINEを開く）
+// B. 商店街 店舗QR用 エンドポイント
 app.get("/usePoint", async (req, res) => {
   const shopId = req.query.shopId || "001";
   const userId = req.query.userId;
@@ -1057,6 +1057,7 @@ async function handleEvent(event) {
         const inputPoints = parseInt(text, 10);
         const currentPoints = await getUserPoints(userId);
 
+        // 入力値が正の整数でない場合
         if (isNaN(inputPoints) || inputPoints <= 0) {
           return await client.replyMessage({
             replyToken: event.replyToken,
@@ -1064,13 +1065,27 @@ async function handleEvent(event) {
               {
                 type: "text",
                 text:
-                  "⚠️ 使いたいポイント数を半角数字で入力してください。（例: 100）\n\n" +
-                  "※キャンセルする場合は「キャンセル」と送信してください。"
+                  "⚠️ 1以上の半角数字でポイント数を入力してください。（例: 100）\n\n" +
+                  "※やめる場合は下の「キャンセル」ボタンを押してください。",
+                quickReply: {
+                  items: [
+                    {
+                      type: "action",
+                      action: {
+                        type: "postback",
+                        label: "❌ キャンセル",
+                        data: JSON.stringify({ action: "cancel_use_point" }),
+                        displayText: "キャンセル"
+                      }
+                    }
+                  ]
+                }
               }
             ]
           });
         }
 
+        // 入力値が保有ポイントを上回っている場合（エラーメッセージ ＆ 再入力待機）
         if (inputPoints > currentPoints) {
           return await client.replyMessage({
             replyToken: event.replyToken,
@@ -1078,14 +1093,29 @@ async function handleEvent(event) {
               {
                 type: "text",
                 text:
-                  `⚠️ 保有ポイント（${currentPoints} pt）を超えるポイント数は指定できません。\n` +
-                  `${currentPoints} pt 以下の数字を入力してください。`
+                  `⚠️ 入力されたポイント（${inputPoints} pt）が、保有ポイント（${currentPoints} pt）を上回っています！\n\n` +
+                  `🪙 現在の保有残高: ${currentPoints} pt\n` +
+                  `使いたいポイント数を ${currentPoints} pt 以下の半角数字で再度入力してください。（例: 50、100）\n\n` +
+                  `※やめる場合は下の「キャンセル」ボタンを押してください。`,
+                quickReply: {
+                  items: [
+                    {
+                      type: "action",
+                      action: {
+                        type: "postback",
+                        label: "❌ キャンセル",
+                        data: JSON.stringify({ action: "cancel_use_point" }),
+                        displayText: "キャンセル"
+                      }
+                    }
+                  ]
+                }
               }
             ]
           });
         }
 
-        // 確認画面（Flex メッセージ）を送信
+        // 保有ポイント以内の場合：確認画面（Flex メッセージ）を送信
         const shopId = pointSession.shopId || "商店街加盟店";
         return await client.replyMessage({
           replyToken: event.replyToken,
@@ -1188,7 +1218,7 @@ async function handleEvent(event) {
         text.startsWith("ポイント使用") ||
         text.startsWith("ポイント利用") ||
         text.startsWith("ポイントを使う") ||
-        text.startsWith("ポイント") && (text.includes("使") || text.includes("払"))
+        (text.startsWith("ポイント") && (text.includes("使") || text.includes("払")))
       ) {
         const currentPoints = await getUserPoints(userId);
 
@@ -1206,7 +1236,7 @@ async function handleEvent(event) {
           });
         }
 
-        // 店舗IDが指定されているか（例: 「ポイント使用 shop001」）
+        // 店舗IDの抽出（例: 「ポイント使用 shop001」）
         const parts = text.split(/\s+/);
         let shopId = "商店街加盟店";
         if (parts.length >= 2 && isNaN(parseInt(parts[1], 10))) {
@@ -1228,8 +1258,20 @@ async function handleEvent(event) {
                 `🪙 【商店街ポイント利用】\n━━━━━━━━━━━━━━\n` +
                 `現在の保有残高: ${currentPoints} pt\n\n` +
                 `使いたいポイント数を半角数字で入力して送信してください。\n` +
-                `（例: 50、100、${currentPoints}）\n\n` +
-                `※キャンセルする場合は「キャンセル」と送信してください。`
+                `（例: 50、100、${currentPoints}）`,
+              quickReply: {
+                items: [
+                  {
+                    type: "action",
+                    action: {
+                      type: "postback",
+                      label: "❌ キャンセル",
+                      data: JSON.stringify({ action: "cancel_use_point" }),
+                      displayText: "キャンセル"
+                    }
+                  }
+                ]
+              }
             }
           ]
         });
