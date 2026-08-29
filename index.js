@@ -20,7 +20,7 @@ const client = new line.messagingApi.MessagingApiClient({
 // メモリ保持用フォールバック
 const memorySessions = new Map();
 const memoryLogs = [];
-const memoryUserTotalPoints = new Map(); // 累計ポイント用メモリマップ
+const memoryUserPoints = new Map(); // 累計ポイント用メモリマップ
 
 // ── 2. タイムゾーン対応関数 ──
 function getJapanNowTimestamp() {
@@ -67,28 +67,27 @@ function getHelpMessage() {
     "📖 【避難ウォークBot の使い方】\n\n" +
     "各コマンドを入力した際の動作説明です：\n\n" +
     "🔹「スタート」\n" +
-    "避難所一覧（地図リンク付き）が表示されます。目標避難所を選択後、LINEの「＋」メニューから【位置情報】を送信すると計測が開始します。\n\n" +
-    "🔹「スタート」（訓練中に送信）\n" +
-    "訓練の途中でも、もう一度「スタート」と送信すると記録をリセットして最初からやり直せます。\n\n" +
+    "避難所一覧が表示されます。目標避難所を選択後、【位置情報】を送信して避難訓練を開始します。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・今回獲得＆累計ポイントが表示されます。\n\n" +
-    "🔹「リセット」／「中止」／「キャンセル」\n" +
-    "現在の避難訓練の記録をすべて削除し、訓練を中止します。再開する場合は「スタート」と送信してください。\n\n" +
+    "避難所到着時に送信します。現在地の【位置情報】を送ると、避難時間・移動距離・獲得ポイントが表示されます。\n\n" +
+    "🔹「リセット」\n" +
+    "現在の訓練記録を破棄して中止します。\n\n" +
+    "🔹「ポイント」／「残高」\n" +
+    "現在の保有ポイント残高を確認できます。\n\n" +
+    "🔹「ポイント使用」／「ポイント利用 [pt]」\n" +
+    "商店街の加盟店でポイントを利用します（例：「ポイント使用 100」）。\n\n" +
     "🔹「避難所」\n" +
-    "登録されている避難所の一覧を表示します。地図リンクから場所を確認できます。\n\n" +
-    "🔹「避難所 ○○」\n" +
-    "特定の避難所名（例：「避難所 熊谷市役所」）を入力すると、その避難所の住所や座標、地図リンクを表示します。\n\n" +
+    "登録避難所一覧を表示します。\n\n" +
     "🔹「履歴」\n" +
-    "過去の避難訓練の記録（直近5件）および現在の累計ポイントを表示します。\n\n" +
-    "🔹「使い方」／「ヘルプ」／「help」\n" +
-    "この説明をもう一度表示します。\n\n" +
+    "過去の訓練記録（直近5件）を表示します。\n\n" +
+    "🔹「使い方」／「ヘルプ」\n" +
+    "この操作説明を表示します。\n\n" +
     "🏆 【ポイント獲得ルール】\n" +
     "・目標まで残り 500m 以内: +1 pt\n" +
     "・目標まで残り 300m 以内: さらに +1 pt (計 2 pt)\n" +
     "・ゴール到達（50m 以内）: さらに +3 pt (計 5 pt)\n" +
     "・急勾配／坂道ルート踏破: +1 pt\n" +
-    "※獲得したポイントは【累計ポイント】としてずっと加算され続けます。\n\n" +
-    "※本Botは避難訓練・経路確認を目的としたツールです。実際の災害時には自治体の指示に従ってください。\n"
+    "※獲得したポイントは商店街の加盟店で 1pt=1円 としてご利用いただけます。\n"
   );
 }
 
@@ -124,7 +123,115 @@ async function deleteSession(userId) {
   memorySessions.delete(userId);
 }
 
-// ── 5. ログ保存 & 履歴取得（Firestore evacuation_logs） ──
+// ── 5. ポイント管理関数（users/{userId}/point） ──
+
+// ユーザーの保有ポイント残高を取得
+async function getUserPoints(userId) {
+  try {
+    const userDoc = await db.collection("users").doc(userId).get();
+    if (userDoc.exists) {
+      const data = userDoc.data();
+      return data.point !== undefined ? data.point : data.points || data.totalPoints || 0;
+    }
+  } catch (e) {
+    console.error("Firestore getUserPoints error:", e.message);
+  }
+  return memoryUserPoints.get(userId) || 0;
+}
+
+// ユーザーのポイントを加算（訓練ゴール時）
+async function addUserPoints(userId, addAmount) {
+  let newTotal = 0;
+  try {
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    const current = userDoc.exists
+      ? userDoc.data().point !== undefined
+        ? userDoc.data().point
+        : userDoc.data().points || userDoc.data().totalPoints || 0
+      : 0;
+
+    newTotal = current + addAmount;
+
+    await userRef.set(
+      {
+        point: newTotal,
+        points: newTotal, // 互換性保持
+        totalPoints: newTotal, // 互換性保持
+        lastEarnedPoints: addAmount,
+        lastDrillAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+  } catch (e) {
+    console.error("Firestore addUserPoints error:", e.message);
+    const current = memoryUserPoints.get(userId) || 0;
+    newTotal = current + addAmount;
+    memoryUserPoints.set(userId, newTotal);
+  }
+  return newTotal;
+}
+
+// ユーザーのポイントを減算（商店街での利用時）
+async function consumeUserPoints(userId, useAmount, shopId = "general_shop") {
+  try {
+    const userRef = db.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return { success: false, message: "ユーザー情報が見つかりません。", remaining: 0 };
+    }
+
+    const data = userDoc.data();
+    const current = data.point !== undefined ? data.point : data.points || data.totalPoints || 0;
+
+    if (current < useAmount) {
+      return {
+        success: false,
+        message: `ポイントが不足しています。（必要: ${useAmount} pt / 現在: ${current} pt）`,
+        remaining: current
+      };
+    }
+
+    const remaining = current - useAmount;
+
+    // ポイント残高を更新
+    await userRef.set(
+      {
+        point: remaining,
+        points: remaining,
+        totalPoints: remaining,
+        updatedAt: FieldValue.serverTimestamp()
+      },
+      { merge: true }
+    );
+
+    // 取引履歴（レシート）を保存
+    await db.collection("point_transactions").add({
+      userId,
+      shopId,
+      usedPoints: useAmount,
+      remainingPoints: remaining,
+      type: "USE",
+      createdAt: FieldValue.serverTimestamp(),
+      createdAtIso: toJapanISOString(Date.now())
+    });
+
+    return { success: true, remaining, used: useAmount, shopId };
+  } catch (e) {
+    console.error("consumeUserPoints error:", e.message);
+    const current = memoryUserPoints.get(userId) || 0;
+    if (current < useAmount) {
+      return { success: false, message: "ポイントが不足しています。", remaining: current };
+    }
+    const remaining = current - useAmount;
+    memoryUserPoints.set(userId, remaining);
+    return { success: true, remaining, used: useAmount, shopId };
+  }
+}
+
+// ── 6. ログ保存 & 履歴取得（Firestore evacuation_logs） ──
 async function saveEvacuationLog(logData) {
   try {
     await db.collection("evacuation_logs").doc(logData.drillId).set({
@@ -164,20 +271,7 @@ async function getUserHistory(userId, limitCount = 5) {
     .slice(0, limitCount);
 }
 
-// ユーザーの最新累計ポイントを取得する関数
-async function getUserTotalPoints(userId) {
-  try {
-    const userDoc = await db.collection("users").doc(userId).get();
-    if (userDoc.exists) {
-      return userDoc.data().totalPoints || 0;
-    }
-  } catch (e) {
-    console.error("Firestore getUserTotalPoints error:", e.message);
-  }
-  return memoryUserTotalPoints.get(userId) || 0;
-}
-
-// ── 6. 避難所マスタ取得（Firestore shelters コレクション） ──
+// ── 7. 避難所マスタ取得（Firestore shelters コレクション） ──
 async function getShelterList() {
   try {
     const snapshot = await db.collection("shelters").get();
@@ -195,7 +289,7 @@ async function getShelterList() {
   }
 }
 
-// ── 6.5. Google Maps Geocoding API ──
+// ── 7.5. Google Maps Geocoding API ──
 async function geocodeAddress(item) {
   const apiKey = config.googleMapsApiKey;
   if (!apiKey) {
@@ -244,7 +338,7 @@ async function geocodeAddress(item) {
   }
 }
 
-// ── 6.6. CSVインポート処理 ──
+// ── 7.6. CSVインポート処理 ──
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function importSheltersFromCsv(csvText) {
@@ -338,7 +432,7 @@ async function importSheltersFromCsv(csvText) {
   };
 }
 
-// ── 7. 位置情報ガード ──
+// ── 8. 位置情報ガード ──
 function isValidJapanCoordinate(lat, lng) {
   if (typeof lat !== "number" || typeof lng !== "number" || isNaN(lat) || isNaN(lng)) {
     return false;
@@ -346,7 +440,7 @@ function isValidJapanCoordinate(lat, lng) {
   return lat >= 20.0 && lat <= 46.0 && lng >= 122.0 && lng <= 154.0;
 }
 
-// ── 8. 距離・時間計算（Routes API ＆ Directions API） ──
+// ── 9. 距離・時間計算（Routes API ＆ Directions API） ──
 function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -389,7 +483,6 @@ async function checkElevationAndSteepSlope(originLat, originLng, destLat, destLn
       }
 
       const totalDist = calculateHaversineDistance(originLat, originLng, destLat, destLng);
-      // 勾配率 = (標高差 / 距離) * 100。勾配 8% 以上 または 標高差 15m 以上を急勾配と判定
       const slopePercentage = totalDist > 0 ? (maxElevationDiff / totalDist) * 100 : 0;
       const isSteep = slopePercentage >= 8.0 || maxElevationDiff >= 15.0;
 
@@ -408,7 +501,7 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
 
   if (apiKey) {
-    // 1. Google Maps Routes API (最新版) を試行
+    // 1. Google Maps Routes API を試行
     try {
       const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
         method: "POST",
@@ -454,15 +547,12 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
             notice: ""
           };
         }
-      } else {
-        const errorText = await response.text();
-        console.warn(`Routes API 返答エラー HTTP ${response.status}:`, errorText);
       }
     } catch (err) {
       console.warn("Routes API 接続エラー:", err.message);
     }
 
-    // 2. Directions API (従来のAPI) でリトライ
+    // 2. Directions API でリトライ
     try {
       const dirUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${originLat},${originLng}&destination=${destLat},${destLng}&mode=walking&key=${apiKey}`;
       const dirResponse = await fetch(dirUrl);
@@ -507,7 +597,7 @@ function formatDistance(meters) {
   return `${Math.round(meters)} m`;
 }
 
-// ── 9. Flex Message カルーセル生成 ──
+// ── 10. Flex Message カルーセル生成 ──
 function createShelterFlex(shelters) {
   if (!shelters || shelters.length === 0) {
     return {
@@ -642,7 +732,7 @@ function createShelterFlex(shelters) {
   };
 }
 
-// ── 10. Express アプリケーション設定 ──
+// ── 11. Express アプリケーション設定 ──
 const app = express();
 
 // A. LINE Webhook
@@ -655,7 +745,57 @@ app.post("/webhook", line.middleware(config), (req, res) => {
     });
 });
 
-// B. 研究用 CSV エクスポートエンドポイント
+// B. 商店街 店舗QR用 ポイント使用エンドポイント (/usePoint)
+app.get("/usePoint", async (req, res) => {
+  const shopId = req.query.shopId || "001";
+  const userId = req.query.userId;
+  const usePoint = parseInt(req.query.points || "100", 10);
+
+  if (!userId) {
+    return res.status(400).send("<html><body><h2>⚠️ ユーザーIDが指定されていません。</h2></body></html>");
+  }
+
+  const result = await consumeUserPoints(userId, usePoint, shopId);
+
+  if (!result.success) {
+    return res.status(400).send(`<html><body><h2>⚠️ ${result.message}</h2><p>現在の残高: ${result.remaining} pt</p></body></html>`);
+  }
+
+  // LINE にプッシュ通知でレシートを送る
+  try {
+    await client.pushMessage({
+      to: userId,
+      messages: [
+        {
+          type: "text",
+          text:
+            `🛍️ 【商店街ポイント利用完了】\n━━━━━━━━━━━━━━\n` +
+            `🏪 店舗ID: ${shopId}\n` +
+            `💸 ご利用ポイント: ${usePoint} pt\n` +
+            `🪙 残りポイント残高: ${result.remaining} pt\n` +
+            `━━━━━━━━━━━━━━\nご利用ありがとうございました！`
+        }
+      ]
+    });
+  } catch (pushErr) {
+    console.warn("LINE push message error:", pushErr.message);
+  }
+
+  return res.status(200).send(`
+    <html>
+      <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family: sans-serif; text-align: center; padding: 40px 20px;">
+        <h1 style="color: #27ae60;">🎉 ポイント利用完了</h1>
+        <p style="font-size: 18px;">店舗: <strong>${shopId}</strong></p>
+        <p style="font-size: 24px; color: #e74c3c; font-weight: bold;">-${usePoint} pt</p>
+        <p style="font-size: 16px; color: #555;">残りポイント残高: <strong>${result.remaining} pt</strong></p>
+        <p style="margin-top: 30px; font-size: 14px; color: #888;">LINEに利用通知を送信しました。この画面を閉じてください。</p>
+      </body>
+    </html>
+  `);
+});
+
+// C. 研究用 CSV エクスポートエンドポイント
 app.get("/export/csv", async (req, res) => {
   const reqKey = req.query.key;
   if (reqKey !== config.adminExportKey) {
@@ -727,7 +867,7 @@ app.get("/export/csv", async (req, res) => {
   }
 });
 
-// C. CSVインポートAPI
+// D. CSVインポートAPI
 app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => {
   try {
     const csvText = req.body;
@@ -749,7 +889,7 @@ app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => 
   }
 });
 
-// D. 危険箇所QRエンドポイント
+// E. 危険箇所QRエンドポイント
 app.get("/hazard", async (req, res) => {
   try {
     const hazardId = req.query.id;
@@ -793,7 +933,7 @@ app.get("/hazard", async (req, res) => {
   }
 });
 
-// ── 11. メインイベント振り分けハンドラ ──
+// ── 12. メインイベント振り分けハンドラ ──
 async function handleEvent(event) {
   const userId = event.source.userId || "anonymous";
 
@@ -804,6 +944,8 @@ async function handleEvent(event) {
     if (event.type === "postback") {
       try {
         const data = JSON.parse(event.postback.data);
+
+        // 避難所選択
         if (data.action === "select_shelter") {
           const shelters = await getShelterList();
           const shelter = shelters.find((s) => s.id === data.shelterId);
@@ -835,6 +977,35 @@ async function handleEvent(event) {
             ]
           });
         }
+
+        // ポイント利用確認（Postback）
+        if (data.action === "confirm_use_point") {
+          const useAmount = data.points || 100;
+          const shopId = data.shopId || "001";
+          const result = await consumeUserPoints(userId, useAmount, shopId);
+
+          if (!result.success) {
+            return await client.replyMessage({
+              replyToken: event.replyToken,
+              messages: [{ type: "text", text: `⚠️ ${result.message}` }]
+            });
+          }
+
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  `🛍️ 【ポイント利用完了】\n━━━━━━━━━━━━━━\n` +
+                  `🏪 店舗: ${shopId}\n` +
+                  `💸 ${useAmount} pt を使用しました。\n` +
+                  `🪙 残りポイント残高: ${result.remaining} pt\n` +
+                  `━━━━━━━━━━━━━━\nご利用ありがとうございました！`
+              }
+            ]
+          });
+        }
       } catch (e) {
         console.error("Postback parse error:", e);
       }
@@ -845,7 +1016,71 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // A. 「スタート」コマンド（過去のセッションを破棄し、新しい訓練を開始）
+      // ── A. 「ポイント確認」コマンド ──
+      if (
+        text === "ポイント" ||
+        text === "ポイント確認" ||
+        text === "残高" ||
+        text === "point" ||
+        text === "points"
+      ) {
+        const currentPoints = await getUserPoints(userId);
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🪙 【ポイント残高確認】\n━━━━━━━━━━━━━━\n` +
+                `現在の保有ポイント: ${currentPoints} pt\n` +
+                `━━━━━━━━━━━━━━\n\n` +
+                `🏪 商店街の加盟店で 1pt = 1円 としてご利用いただけます！\n` +
+                `・「ポイント使用 100」のように送信するか、店頭のQRコードを読み取ってご利用ください。`
+            }
+          ]
+        });
+      }
+
+      // ── B. 「ポイント使用」コマンド（商店街での減算処理） ──
+      if (text.startsWith("ポイント使用") || text.startsWith("ポイント利用") || text.startsWith("ポイントを使う")) {
+        // 例: 「ポイント使用 100」や「ポイント使用 50 001」など
+        const parts = text.split(/\s+/);
+        let useAmount = 100; // デフォルト100pt
+        let shopId = "商店街加盟店";
+
+        if (parts.length >= 2 && !isNaN(parseInt(parts[1], 10))) {
+          useAmount = parseInt(parts[1], 10);
+        }
+        if (parts.length >= 3) {
+          shopId = parts[2];
+        }
+
+        const result = await consumeUserPoints(userId, useAmount, shopId);
+
+        if (!result.success) {
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [{ type: "text", text: `⚠️ ${result.message}` }]
+          });
+        }
+
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🛍️ 【ポイント利用完了】\n━━━━━━━━━━━━━━\n` +
+                `🏪 ご利用店舗: ${shopId}\n` +
+                `💸 ${useAmount} pt を使用しました。\n` +
+                `🪙 残りポイント残高: ${result.remaining} pt\n` +
+                `━━━━━━━━━━━━━━\nまたのご利用をお待ちしております！`
+            }
+          ]
+        });
+      }
+
+      // ── C. 「スタート」コマンド ──
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
         const shelters = await getShelterList();
@@ -865,7 +1100,7 @@ async function handleEvent(event) {
         });
       }
 
-      // B. 訓練中のテキストコマンド処理
+      // ── D. 訓練中のテキストコマンド処理 ──
       if (session) {
         // リセット
         if (text === "リセット" || text === "中止" || text === "キャンセル") {
@@ -940,7 +1175,7 @@ async function handleEvent(event) {
         });
       }
 
-      // C. 訓練前の避難所・履歴機能
+      // ── E. 訓練前の避難所・履歴・案内 ──
 
       // 避難所一覧
       if (text === "避難所") {
@@ -957,7 +1192,7 @@ async function handleEvent(event) {
         });
       }
 
-      // 避難所詳細（部分一致検索）
+      // 避難所詳細
       if (text.startsWith("避難所 ")) {
         const name = text.replace("避難所 ", "").trim();
         const shelters = await getShelterList();
@@ -985,7 +1220,7 @@ async function handleEvent(event) {
         });
       }
 
-      // 使い方・ヘルプ（訓練前）
+      // 使い方・ヘルプ
       if (text === "使い方" || text === "つかいかた" || text === "ヘルプ" || text === "help") {
         return await client.replyMessage({
           replyToken: event.replyToken,
@@ -997,7 +1232,7 @@ async function handleEvent(event) {
       if (text === "履歴" || text === "りれき" || text === "記録" || text === "history") {
         const [history, currentTotalPoints] = await Promise.all([
           getUserHistory(userId, 5),
-          getUserTotalPoints(userId)
+          getUserPoints(userId)
         ]);
 
         if (!history || history.length === 0) {
@@ -1007,7 +1242,7 @@ async function handleEvent(event) {
               {
                 type: "text",
                 text:
-                  `🌟 現在の累計ポイント: ${currentTotalPoints} pt\n\n` +
+                  `🪙 現在の保有ポイント: ${currentTotalPoints} pt\n\n` +
                   "📋 過去の避難訓練記録はまだありません。\n「スタート」と送信して避難訓練を開始しましょう！"
               }
             ]
@@ -1015,7 +1250,7 @@ async function handleEvent(event) {
         }
 
         let historyMsg =
-          `🌟 現在の累計ポイント: ${currentTotalPoints} pt\n\n` +
+          `🪙 現在の保有ポイント: ${currentTotalPoints} pt\n\n` +
           `📋 【過去の避難訓練履歴（直近5件）】\n━━━━━━━━━━━━━━\n`;
 
         history.forEach((h, idx) => {
@@ -1045,7 +1280,7 @@ async function handleEvent(event) {
         });
       }
 
-      // 訓練前の案内
+      // デフォルト案内
       return await client.replyMessage({
         replyToken: event.replyToken,
         messages: [
@@ -1055,8 +1290,10 @@ async function handleEvent(event) {
               "メッセージありがとうございます。\n\n" +
               "【ご利用方法】\n" +
               "・「スタート」: 避難訓練を開始します\n" +
+              "・「ポイント」: 保有ポイント残高を確認します\n" +
+              "・「ポイント使用」: 商店街でポイントを利用します\n" +
               "・「避難所」: 登録されている避難所一覧を表示します\n" +
-              "・「履歴」: 過去の訓練結果と累計ポイントを表示します\n" +
+              "・「履歴」: 過去の訓練結果を表示します\n" +
               "・「使い方」: 操作説明を表示します"
           }
         ]
@@ -1158,7 +1395,6 @@ async function handleEvent(event) {
         const shelter = session.targetShelter;
         const startLoc = session.startLocation;
 
-        // ルート距離計算と高低差・急勾配チェックを並行処理
         const [walkedRoute, remRoute, elevationInfo] = await Promise.all([
           getWalkingRoute(startLoc.lat, startLoc.lng, lat, lng),
           getWalkingRoute(lat, lng, shelter.lat, shelter.lng),
@@ -1170,7 +1406,6 @@ async function handleEvent(event) {
         const secs = elapsedSeconds % 60;
         const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
 
-        // 避難所までの直線距離（高精度判定）
         const directDistToShelter = calculateHaversineDistance(lat, lng, shelter.lat, shelter.lng);
         const remainingMeters = Math.min(directDistToShelter, remRoute.distanceMeters);
 
@@ -1203,32 +1438,10 @@ async function handleEvent(event) {
           pointDetails.push(`急勾配・難所ルート踏破 (+1pt / 標高差約${elevationInfo.elevationGain}m)`);
         }
 
-        // ── 2. 新しい変数「totalPoints（累計ポイント）」に加算して保存 ──
-        let totalPoints = 0;
-        try {
-          const userRef = db.collection("users").doc(userId);
-          const userDoc = await userRef.get();
-          const currentTotal = userDoc.exists ? userDoc.data().totalPoints || 0 : 0;
+        // ── 2. Firestore の users/{userId}/point に累計加算 ──
+        const totalPoints = await addUserPoints(userId, pointsEarned);
 
-          // 累計ポイントを加算更新
-          totalPoints = currentTotal + pointsEarned;
-
-          await userRef.set(
-            {
-              totalPoints: totalPoints, // 累計ポイント（消えずに蓄積）
-              lastEarnedPoints: pointsEarned,
-              lastDrillAt: FieldValue.serverTimestamp()
-            },
-            { merge: true }
-          );
-        } catch (e) {
-          console.error("Total point update error:", e.message);
-          const currentTotal = memoryUserTotalPoints.get(userId) || 0;
-          totalPoints = currentTotal + pointsEarned;
-          memoryUserTotalPoints.set(userId, totalPoints);
-        }
-
-        // ── 3. ログ保存 & 今回のセッション破棄（次回用ポイントは0からスタート） ──
+        // ── 3. ログ保存 & セッション削除 ──
         const drillId = `${userId}_${Date.now()}`;
         const logData = {
           drillId,
@@ -1248,7 +1461,7 @@ async function handleEvent(event) {
           remainingDistanceMeters: Math.round(remainingMeters),
           isArrived,
           pointsEarned,
-          totalPointsAfterDrill: totalPoints, // 終了時点の累計ポイント
+          totalPointsAfterDrill: totalPoints,
           hasSteepSlope: elevationInfo.hasSteepSlope,
           elevationGain: elevationInfo.elevationGain,
           achievementLevel: isArrived ? "GOAL" : remainingMeters <= 300 ? "NEAR_300M" : remainingMeters <= 500 ? "NEAR_500M" : "PARTIAL",
@@ -1256,13 +1469,12 @@ async function handleEvent(event) {
         };
 
         await saveEvacuationLog(logData);
-        await deleteSession(userId); // セッション削除（次回訓練時は0から加算開始）
+        await deleteSession(userId); // 次回訓練時は0から加算開始
 
         const statusMsg = isArrived
           ? `🎉 目標避難所「${shelter.name}」に無事到着しました！（残距離 ${Math.round(remainingMeters)}m）`
           : `🏁 避難計測を終了しました。（目標まであと ${formatDistance(remainingMeters)}）`;
 
-        // 獲得ポイントと内訳の表示メッセージ
         let pointMsg = `🏆 今回の獲得ポイント: +${pointsEarned} pt\n`;
         if (pointDetails.length > 0) {
           pointMsg += `\n【ポイント内訳】\n` + pointDetails.map((d) => `・${d}`).join("\n") + "\n";
@@ -1280,8 +1492,8 @@ async function handleEvent(event) {
                 `🚶 移動距離: ${formatDistance(walkedRoute.distanceMeters)}\n` +
                 `${pointMsg}` +
                 `━━━━━━━━━━━━━━\n` +
-                `🌟 現在の累計ポイント: ${totalPoints} pt\n` +
-                `（※今回の獲得分が加算されました。次回の訓練も0ptから開始されます。）\n\n` +
+                `🪙 現在の保有ポイント: ${totalPoints} pt\n` +
+                `（※今回の獲得分が加算されました。商店街加盟店で利用できます！）\n\n` +
                 `おつかれさまでした！日頃からの備えと経路の確認を心がけましょう。`
             }
           ]
@@ -1324,7 +1536,7 @@ async function handleEvent(event) {
   }
 }
 
-// ── 12. サーバー起動処理 ──
+// ── 13. サーバー起動処理 ──
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`🚀 Hinan Walk Bot server is running on port ${PORT}`);
