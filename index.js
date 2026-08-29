@@ -17,7 +17,7 @@ const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
 });
 
-// メモリ保持用フォールバック（Firestore障害時の一時退避用）
+// メモリ保持用フォールバック
 const memorySessions = new Map();
 const memoryLogs = [];
 
@@ -70,7 +70,7 @@ function getHelpMessage() {
     "🔹「スタート」（訓練中に送信）\n" +
     "訓練の途中でも、もう一度「スタート」と送信すると記録をリセットして最初からやり直せます。\n\n" +
     "🔹「ゴール」\n" +
-    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・目標到着判定が表示されます。\n\n" +
+    "避難所到着時（または途中で終了したい時）に入力します。入力後に現在地の【位置情報】を送信すると、避難時間・移動距離・獲得ポイントが表示されます。\n\n" +
     "🔹「リセット」／「中止」／「キャンセル」\n" +
     "現在の避難訓練の記録をすべて削除し、訓練を中止します。再開する場合は「スタート」と送信してください。\n\n" +
     "🔹「避難所」\n" +
@@ -78,10 +78,15 @@ function getHelpMessage() {
     "🔹「避難所 ○○」\n" +
     "特定の避難所名（例：「避難所 熊谷市役所」）を入力すると、その避難所の住所や座標、地図リンクを表示します。\n\n" +
     "🔹「履歴」\n" +
-    "過去の避難訓練の記録（直近5件）を一覧で表示します。避難時間や移動距離、到着状況を確認できます。\n\n" +
+    "過去の避難訓練の記録（直近5件）を一覧で表示します。\n\n" +
     "🔹「使い方」／「ヘルプ」／「help」\n" +
-    "この説明をもう一度表示します。操作に迷ったときに送信してください。\n\n" +
-    "※本Botは避難訓練・経路確認を目的としたツールです。実際の災害時には、自治体からの公式情報や避難指示を必ず確認してください。\n"
+    "この説明をもう一度表示します。\n\n" +
+    "🏆 【ポイント獲得ルール】\n" +
+    "・目標まで残り 500m 以内: +1 pt\n" +
+    "・目標まで残り 300m 以内: さらに +1 pt (計 2 pt)\n" +
+    "・ゴール到達（50m 以内）: さらに +3 pt (計 5 pt)\n" +
+    "・急勾配／坂道ルート踏破: +1 pt\n\n" +
+    "※本Botは避難訓練・経路確認を目的としたツールです。実際の災害時には自治体の指示に従ってください。\n"
   );
 }
 
@@ -157,7 +162,7 @@ async function getUserHistory(userId, limitCount = 5) {
     .slice(0, limitCount);
 }
 
-// ── 6. 避難所マスタ取得（Firestore shelters コレクションを直接参照） ──
+// ── 6. 避難所マスタ取得（Firestore shelters コレクション） ──
 async function getShelterList() {
   try {
     const snapshot = await db.collection("shelters").get();
@@ -326,7 +331,7 @@ function isValidJapanCoordinate(lat, lng) {
   return lat >= 20.0 && lat <= 46.0 && lng >= 122.0 && lng <= 154.0;
 }
 
-// ── 8. 距離・時間計算（Routes API ＆ Directions API 二重対応） ──
+// ── 8. 距離・時間計算（Routes API ＆ Directions API） ──
 function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -340,6 +345,48 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
 
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+/**
+ * ルート上の標高データ（高低差・急勾配・坂道）を取得・判定
+ */
+async function checkElevationAndSteepSlope(originLat, originLng, destLat, destLng) {
+  const apiKey = config.googleMapsApiKey;
+  if (!apiKey) return { hasSteepSlope: false, elevationGain: 0 };
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/elevation/json?path=${originLat},${originLng}|${destLat},${destLng}&samples=5&key=${apiKey}`;
+    const response = await fetch(url);
+    if (!response.ok) return { hasSteepSlope: false, elevationGain: 0 };
+
+    const data = await response.json();
+    if (data.status === "OK" && data.results && data.results.length >= 2) {
+      let maxElevationDiff = 0;
+      let prev = data.results[0].elevation;
+
+      for (let i = 1; i < data.results.length; i++) {
+        const curr = data.results[i].elevation;
+        const diff = curr - prev;
+        if (diff > maxElevationDiff) {
+          maxElevationDiff = diff;
+        }
+        prev = curr;
+      }
+
+      const totalDist = calculateHaversineDistance(originLat, originLng, destLat, destLng);
+      // 勾配率 = (標高差 / 距離) * 100。勾配 8% 以上 または 標高差 15m 以上を急勾配と判定
+      const slopePercentage = totalDist > 0 ? (maxElevationDiff / totalDist) * 100 : 0;
+      const isSteep = slopePercentage >= 8.0 || maxElevationDiff >= 15.0;
+
+      return {
+        hasSteepSlope: isSteep,
+        elevationGain: Math.round(maxElevationDiff)
+      };
+    }
+  } catch (err) {
+    console.warn("Elevation API check failed:", err.message);
+  }
+  return { hasSteepSlope: false, elevationGain: 0 };
 }
 
 async function getWalkingRoute(originLat, originLng, destLat, destLng) {
@@ -417,18 +464,14 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
             isRouteApi: true,
             notice: ""
           };
-        } else {
-          console.warn(`Directions API ステータスエラー: ${dirData.status}`, dirData.error_message || "");
         }
       }
     } catch (dirErr) {
       console.warn("Directions API 接続エラー:", dirErr.message);
     }
-  } else {
-    console.warn("⚠️ Google Maps API Key (GOOGLE_MAPS_API_KEY) が設定されていません。");
   }
 
-  // 3. 全て失敗した場合のフォールバック: 直線距離 × 1.25 & 分速80m
+  // 3. フォールバック
   const straightDist = calculateHaversineDistance(originLat, originLng, destLat, destLng);
   const estimatedWalkingDist = Math.round(straightDist * 1.25);
   const estimatedSeconds = Math.round((estimatedWalkingDist / 80) * 60);
@@ -626,6 +669,8 @@ app.get("/export/csv", async (req, res) => {
       "initialDistanceMeters",
       "remainingDistanceMeters",
       "isArrived",
+      "pointsEarned",
+      "hasSteepSlope",
       "achievementLevel",
       "routeSource"
     ];
@@ -648,6 +693,8 @@ app.get("/export/csv", async (req, res) => {
       l.initialDistanceMeters || 0,
       l.remainingDistanceMeters || 0,
       l.isArrived ? "TRUE" : "FALSE",
+      l.pointsEarned || 0,
+      l.hasSteepSlope ? "TRUE" : "FALSE",
       l.achievementLevel || "",
       l.routeSource || ""
     ]);
@@ -685,7 +732,7 @@ app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => 
   }
 });
 
-// D. 危険箇所QR（hazard?id=xxx）エンドポイント
+// D. 危険箇所QRエンドポイント
 app.get("/hazard", async (req, res) => {
   try {
     const hazardId = req.query.id;
@@ -703,7 +750,6 @@ app.get("/hazard", async (req, res) => {
     const targetUserId = hazard.notifyUserId || hazard.defaultUserId;
 
     if (!targetUserId) {
-      console.warn("No target userId found for hazard:", hazardId);
       return res.status(400).send("Target userId for notification is not set");
     }
 
@@ -737,7 +783,7 @@ async function handleEvent(event) {
   try {
     let session = await getSession(userId);
 
-    // 1. Postback イベント処理（避難所選択時）
+    // 1. Postback イベント処理
     if (event.type === "postback") {
       try {
         const data = JSON.parse(event.postback.data);
@@ -877,7 +923,7 @@ async function handleEvent(event) {
         });
       }
 
-      // C. 訓練前の避難所・履歴機能（session が存在しない場合）
+      // C. 訓練前の避難所・履歴機能
 
       // 避難所一覧
       if (text === "避難所") {
@@ -957,12 +1003,13 @@ async function handleEvent(event) {
           const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
           const distStr = formatDistance(h.walkedDistanceMeters || 0);
           const statusIcon = h.isArrived ? "🎉 到着" : "🏁 途中終了";
+          const ptStr = h.pointsEarned ? ` (+${h.pointsEarned}pt)` : "";
 
           historyMsg +=
             `[第${idx + 1}回] ${dateStr}\n` +
             `🏢 ${h.shelterName || "避難所"}\n` +
             `⏱️ 避難時間: ${timeStr} / 🚶 移動距離: ${distStr}\n` +
-            `結果: ${statusIcon}\n` +
+            `結果: ${statusIcon}${ptStr}\n` +
             `──────────────────\n`;
         });
         historyMsg += "訓練を新しく始めるには「スタート」と送信してください。";
@@ -996,7 +1043,6 @@ async function handleEvent(event) {
       const lat = event.message.latitude;
       const lng = event.message.longitude;
 
-      // 日本国内の座標チェック
       if (!isValidJapanCoordinate(lat, lng)) {
         return await client.replyMessage({
           replyToken: event.replyToken,
@@ -1087,9 +1133,11 @@ async function handleEvent(event) {
         const shelter = session.targetShelter;
         const startLoc = session.startLocation;
 
-        const [walkedRoute, remRoute] = await Promise.all([
+        // ルート距離計算と高低差・急勾配チェックを並行処理
+        const [walkedRoute, remRoute, elevationInfo] = await Promise.all([
           getWalkingRoute(startLoc.lat, startLoc.lng, lat, lng),
-          getWalkingRoute(lat, lng, shelter.lat, shelter.lng)
+          getWalkingRoute(lat, lng, shelter.lat, shelter.lng),
+          checkElevationAndSteepSlope(startLoc.lat, startLoc.lng, lat, lng)
         ]);
 
         const elapsedSeconds = Math.max(0, Math.round((goalTime - session.startTimeMs) / 1000));
@@ -1097,27 +1145,58 @@ async function handleEvent(event) {
         const secs = elapsedSeconds % 60;
         const timeStr = mins > 0 ? `${mins}分${secs}秒` : `${secs}秒`;
 
-        const isArrived = remRoute.distanceMeters <= 100;
-        const drillId = `${userId}_${Date.now()}`;
+        // 避難所までの直線距離（高精度判定）
+        const directDistToShelter = calculateHaversineDistance(lat, lng, shelter.lat, shelter.lng);
+        const remainingMeters = Math.min(directDistToShelter, remRoute.distanceMeters);
 
+        // ── ポイント判定ロジック ──
         let pointsEarned = 0;
-        if (isArrived) {
-          pointsEarned = 100;
-        } else if (walkedRoute.distanceMeters > 0) {
-          pointsEarned = 30;
+        const pointDetails = [];
+
+        // 1. 500m以内圏内 (+1 pt)
+        if (remainingMeters <= 500) {
+          pointsEarned += 1;
+          pointDetails.push("500m圏内接近 (+1pt)");
         }
 
+        // 2. 300m以内圏内 (さらに +1 pt)
+        if (remainingMeters <= 300) {
+          pointsEarned += 1;
+          pointDetails.push("300m圏内接近 (+1pt)");
+        }
+
+        // 3. ゴール（50m以内到達） (さらに +3 pt)
+        const isArrived = remainingMeters <= 50;
+        if (isArrived) {
+          pointsEarned += 3;
+          pointDetails.push("避難所ゴール到達 (+3pt)");
+        }
+
+        // 4. 急勾配・坂道ルート踏破ボーナス (+1 pt)
+        if (elevationInfo.hasSteepSlope) {
+          pointsEarned += 1;
+          pointDetails.push(`急勾配・難所ルート踏破 (+1pt / 標高差約${elevationInfo.elevationGain}m)`);
+        }
+
+        // Firestore のユーザードキュメントに累計ポイントを加算
         if (pointsEarned > 0) {
           try {
             const userRef = db.collection("users").doc(userId);
             const userDoc = await userRef.get();
             const currentPoints = userDoc.exists ? userDoc.data().points || 0 : 0;
-            await userRef.set({ points: currentPoints + pointsEarned }, { merge: true });
+            await userRef.set(
+              {
+                points: currentPoints + pointsEarned,
+                lastDrillAt: FieldValue.serverTimestamp()
+              },
+              { merge: true }
+            );
           } catch (e) {
             console.error("Point update error:", e.message);
           }
         }
 
+        const drillId = `${userId}_${Date.now()}`;
         const logData = {
           drillId,
           userId,
@@ -1133,9 +1212,12 @@ async function handleEvent(event) {
           goalLng: lng,
           walkedDistanceMeters: walkedRoute.distanceMeters,
           initialDistanceMeters: session.initialDistance,
-          remainingDistanceMeters: remRoute.distanceMeters,
+          remainingDistanceMeters: Math.round(remainingMeters),
           isArrived,
-          achievementLevel: isArrived ? "GOAL" : "PARTIAL",
+          pointsEarned,
+          hasSteepSlope: elevationInfo.hasSteepSlope,
+          elevationGain: elevationInfo.elevationGain,
+          achievementLevel: isArrived ? "GOAL" : remainingMeters <= 300 ? "NEAR_300M" : remainingMeters <= 500 ? "NEAR_500M" : "PARTIAL",
           routeSource: walkedRoute.isRouteApi ? "ROUTE_API" : "FALLBACK"
         };
 
@@ -1143,10 +1225,13 @@ async function handleEvent(event) {
         await deleteSession(userId);
 
         const statusMsg = isArrived
-          ? `🎉 目標避難所「${shelter.name}」に無事到着しました！`
-          : `🏁 避難計測を終了しました。（目標まであと ${formatDistance(remRoute.distanceMeters)}）`;
+          ? `🎉 目標避難所「${shelter.name}」に無事到着しました！（残距離 ${Math.round(remainingMeters)}m）`
+          : `🏁 避難計測を終了しました。（目標まであと ${formatDistance(remainingMeters)}）`;
 
-        const pointMsg = pointsEarned > 0 ? `\n🎁 避難訓練の実施により ${pointsEarned} pt を獲得しました！` : "";
+        const pointMsg =
+          pointsEarned > 0
+            ? `\n🎁 【獲得ポイント: +${pointsEarned} pt】\n` + pointDetails.map((d) => `・${d}`).join("\n")
+            : "";
 
         return await client.replyMessage({
           replyToken: event.replyToken,
@@ -1165,7 +1250,7 @@ async function handleEvent(event) {
         });
       }
 
-      // 訓練進行中（IN_PROGRESS）
+      // 訓練進行中
       if (session.status === "IN_PROGRESS") {
         return await client.replyMessage({
           replyToken: event.replyToken,
