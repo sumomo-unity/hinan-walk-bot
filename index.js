@@ -2,14 +2,8 @@ const express = require("express");
 const line = require("@line/bot-sdk");
 const { Firestore, FieldValue } = require("@google-cloud/firestore");
 
-// Cloud Run のサービスアカウント自動認証（ローカル等の未設定時もエラー回避）
-let db = null;
-try {
-  db = new Firestore();
-  console.log("🔥 [Firestore] @google-cloud/firestore で接続しました。");
-} catch (e) {
-  console.warn("⚠️ [Firestore] 初期化に失敗しました。メモリモードで動作します:", e.message);
-}
+// Cloud Run 実行環境のデフォルトサービスアカウントで Firestore (default) に自動接続
+const db = new Firestore();
 
 // ── 1. 各種設定 & 認証情報 ──
 const config = {
@@ -23,102 +17,11 @@ const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: config.channelAccessToken
 });
 
-// メモリ保持用フォールバック
+// メモリ保持用フォールバック（Firestore障害時の一時退避用）
 const memorySessions = new Map();
 const memoryLogs = [];
 
-// ── 2. 熊谷市 避難所初期マスタデータ ──
-const KUMAGAYA_SHELTERS = [
-  {
-    id: "kumagaya_1",
-    name: "熊谷市役所（本庁舎）",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定緊急避難場所",
-    address: "埼玉県熊谷市宮町2丁目47-1",
-    lat: 36.147285,
-    lng: 139.388701,
-    tagColor: "#27ae60"
-  },
-  {
-    id: "kumagaya_2",
-    name: "熊谷市立熊谷東小学校",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所（地震・水害）",
-    address: "埼玉県熊谷市末広3丁目1-1",
-    lat: 36.148150,
-    lng: 139.397620,
-    tagColor: "#2980b9"
-  },
-  {
-    id: "kumagaya_3",
-    name: "熊谷市立熊谷南小学校",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所（地震・水害）",
-    address: "埼玉県熊谷市万平町2丁目1",
-    lat: 36.136200,
-    lng: 139.387800,
-    tagColor: "#2980b9"
-  },
-  {
-    id: "kumagaya_4",
-    name: "熊谷市立熊谷西小学校",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所（地震）",
-    address: "埼玉県熊谷市新島123",
-    lat: 36.155800,
-    lng: 139.369500,
-    tagColor: "#2980b9"
-  },
-  {
-    id: "kumagaya_5",
-    name: "熊谷スポーツ文化公園",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "広域避難場所",
-    address: "埼玉県熊谷市上川上300",
-    lat: 36.166800,
-    lng: 139.412500,
-    tagColor: "#e67e22"
-  },
-  {
-    id: "kumagaya_6",
-    name: "妻沼中央公民館",
-    city: "熊谷市",
-    prefecture: "埼玉県",
-    type: "指定避難所",
-    address: "埼玉県熊谷市妻沼東1丁目1",
-    lat: 36.231200,
-    lng: 139.387500,
-    tagColor: "#8e44ad"
-  }
-];
-
-// 起動時に Firestore が空の場合は初期データをシード
-async function seedSheltersIfEmpty() {
-  if (!db) return;
-  try {
-    const snapshot = await db.collection("shelters").limit(1).get();
-    if (snapshot.empty) {
-      console.log("📦 Firestore の shelters コレクションに初期データを投入中...");
-      const batch = db.batch();
-      for (const s of KUMAGAYA_SHELTERS) {
-        const ref = db.collection("shelters").doc(s.id);
-        batch.set(ref, { ...s, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
-      }
-      await batch.commit();
-      console.log("✅ 初期避難所データの投入が完了しました。");
-    }
-  } catch (e) {
-    console.warn("⚠️ 避難所初期データ投入スキップ:", e.message);
-  }
-}
-seedSheltersIfEmpty();
-
-// ── 3.5. タイムゾーン対応関数 ──
+// ── 2. タイムゾーン対応関数 ──
 function getJapanNowTimestamp() {
   return Date.now();
 }
@@ -157,7 +60,7 @@ function formatJapanDate(timestamp) {
   });
 }
 
-// ── 3.7. 「使い方」テキスト生成関数 ──
+// ── 3. 「使い方」テキスト生成関数 ──
 function getHelpMessage() {
   return (
     "📖 【避難ウォークBot の使い方】\n\n" +
@@ -182,82 +85,70 @@ function getHelpMessage() {
   );
 }
 
-// ── 4. セッション管理（Firestore / メモリ両対応） ──
+// ── 4. セッション管理（Firestore user_sessions） ──
 async function getSession(userId) {
-  if (db) {
-    try {
-      const doc = await db.collection("user_sessions").doc(userId).get();
-      if (doc.exists) return doc.data();
-    } catch (e) {
-      console.error("Firestore getSession error:", e.message);
-    }
+  try {
+    const doc = await db.collection("user_sessions").doc(userId).get();
+    if (doc.exists) return doc.data();
+  } catch (e) {
+    console.error("Firestore getSession error:", e.message);
   }
   return memorySessions.get(userId) || null;
 }
 
 async function saveSession(userId, sessionData) {
-  if (db) {
-    try {
-      await db.collection("user_sessions").doc(userId).set({
-        ...sessionData,
-        updatedAt: FieldValue.serverTimestamp()
-      });
-      return;
-    } catch (e) {
-      console.error("Firestore saveSession error:", e.message);
-    }
+  try {
+    await db.collection("user_sessions").doc(userId).set({
+      ...sessionData,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+  } catch (e) {
+    console.error("Firestore saveSession error:", e.message);
+    memorySessions.set(userId, sessionData);
   }
-  memorySessions.set(userId, sessionData);
 }
 
 async function deleteSession(userId) {
-  if (db) {
-    try {
-      await db.collection("user_sessions").doc(userId).delete();
-    } catch (e) {
-      console.error("Firestore deleteSession error:", e.message);
-    }
+  try {
+    await db.collection("user_sessions").doc(userId).delete();
+  } catch (e) {
+    console.error("Firestore deleteSession error:", e.message);
   }
   memorySessions.delete(userId);
 }
 
-// ── 5. ログ保存 & 履歴取得 ──
+// ── 5. ログ保存 & 履歴取得（Firestore evacuation_logs） ──
 async function saveEvacuationLog(logData) {
-  if (db) {
-    try {
-      await db.collection("evacuation_logs").doc(logData.drillId).set({
-        ...logData,
-        createdAt: FieldValue.serverTimestamp()
-      });
-      return;
-    } catch (e) {
-      console.error("Firestore saveEvacuationLog error:", e.message);
-    }
+  try {
+    await db.collection("evacuation_logs").doc(logData.drillId).set({
+      ...logData,
+      createdAt: FieldValue.serverTimestamp()
+    });
+  } catch (e) {
+    console.error("Firestore saveEvacuationLog error:", e.message);
+    memoryLogs.push({ ...logData, createdAt: new Date() });
   }
-  memoryLogs.push({ ...logData, createdAt: new Date() });
 }
 
 async function getUserHistory(userId, limitCount = 5) {
-  if (db) {
-    try {
-      const snapshot = await db
-        .collection("evacuation_logs")
-        .where("userId", "==", userId)
-        .get();
+  try {
+    const snapshot = await db
+      .collection("evacuation_logs")
+      .where("userId", "==", userId)
+      .get();
 
-      if (!snapshot.empty) {
-        const logs = snapshot.docs.map((d) => d.data());
-        return logs
-          .sort((a, b) => {
-            const timeA = typeof a.startTime === "number" ? a.startTime : new Date(a.startTime).getTime();
-            const timeB = typeof b.startTime === "number" ? b.startTime : new Date(b.startTime).getTime();
-            return timeB - timeA;
-          })
-          .slice(0, limitCount);
-      }
-    } catch (e) {
-      console.error("Firestore getUserHistory error:", e.message);
+    if (!snapshot.empty) {
+      const logs = snapshot.docs.map((d) => d.data());
+      return logs
+        .sort((a, b) => {
+          const timeA = typeof a.startTime === "number" ? a.startTime : new Date(a.startTime).getTime();
+          const timeB = typeof b.startTime === "number" ? b.startTime : new Date(b.startTime).getTime();
+          return timeB - timeA;
+        })
+        .slice(0, limitCount);
     }
+  } catch (e) {
+    console.error("Firestore getUserHistory error:", e.message);
   }
 
   return memoryLogs
@@ -266,19 +157,22 @@ async function getUserHistory(userId, limitCount = 5) {
     .slice(0, limitCount);
 }
 
-// ── 6. 避難所マスタ取得 ──
+// ── 6. 避難所マスタ取得（Firestore shelters コレクションを直接参照） ──
 async function getShelterList() {
-  if (db) {
-    try {
-      const snapshot = await db.collection("shelters").get();
-      if (!snapshot.empty) {
-        return snapshot.docs.map((doc) => doc.data());
-      }
-    } catch (e) {
-      console.warn("Firestore shelters get failed:", e.message);
+  try {
+    const snapshot = await db.collection("shelters").get();
+    if (!snapshot.empty) {
+      return snapshot.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data()
+      }));
     }
+    console.warn("⚠️ Firestore の 'shelters' コレクションにデータが存在しません。");
+    return [];
+  } catch (e) {
+    console.error("❌ Firestore shelters 取得エラー:", e.message);
+    return [];
   }
-  return KUMAGAYA_SHELTERS;
 }
 
 // ── 6.5. Google Maps Geocoding API ──
@@ -409,9 +303,7 @@ async function importSheltersFromCsv(csvText) {
         lng
       };
 
-      if (db) {
-        await db.collection("shelters").doc(shelterData.id).set(shelterData);
-      }
+      await db.collection("shelters").doc(shelterData.id).set(shelterData);
       successShelters.push(shelterData);
       await sleep(200);
     } catch (err) {
@@ -690,13 +582,8 @@ app.get("/export/csv", async (req, res) => {
   }
 
   try {
-    let logs = [];
-    if (db) {
-      const snapshot = await db.collection("evacuation_logs").orderBy("startTime", "desc").get();
-      logs = snapshot.docs.map((d) => d.data());
-    } else {
-      logs = [...memoryLogs];
-    }
+    const snapshot = await db.collection("evacuation_logs").orderBy("startTime", "desc").get();
+    const logs = snapshot.docs.map((d) => d.data());
 
     const headers = [
       "drillId",
@@ -781,10 +668,6 @@ app.get("/hazard", async (req, res) => {
     const hazardId = req.query.id;
     if (!hazardId) {
       return res.status(400).send("hazard id is missing");
-    }
-
-    if (!db) {
-      return res.status(500).send("Database is not connected");
     }
 
     const doc = await db.collection("hazards").doc(hazardId).get();
@@ -876,7 +759,7 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // A. 「スタート」コマンド（どの状態からでも訓練を開始できる）
+      // A. 「スタート」コマンド
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
         const shelters = await getShelterList();
@@ -992,7 +875,7 @@ async function handleEvent(event) {
       if (text.startsWith("避難所 ")) {
         const name = text.replace("避難所 ", "").trim();
         const shelters = await getShelterList();
-        const shelter = shelters.find((s) => s.name.includes(name));
+        const shelter = shelters.find((s) => s.name && s.name.includes(name));
 
         if (!shelter) {
           return await client.replyMessage({
@@ -1008,7 +891,7 @@ async function handleEvent(event) {
               type: "text",
               text:
                 `🏢 ${shelter.name}\n` +
-                `📍 住所: ${shelter.address}\n` +
+                `📍 住所: ${shelter.address || "住所情報なし"}\n` +
                 `🌐 座標: ${shelter.lat}, ${shelter.lng}\n\n` +
                 `地図: https://www.google.com/maps/search/${shelter.lat},${shelter.lng}`
             }
@@ -1067,7 +950,7 @@ async function handleEvent(event) {
         });
       }
 
-      // 訓練前にどの条件にも一致しないコマンドが入力された場合の案内
+      // 訓練前の案内
       return await client.replyMessage({
         replyToken: event.replyToken,
         messages: [
@@ -1134,7 +1017,7 @@ async function handleEvent(event) {
               text:
                 `📍 最寄りの避難所は「${nearest.name}」です。\n` +
                 `距離: ${Math.round(minDist)}m\n` +
-                `住所: ${nearest.address}\n\n` +
+                `住所: ${nearest.address || "住所情報なし"}\n\n` +
                 `地図: https://www.google.com/maps/search/${nearest.lat},${nearest.lng}`
             }
           ]
@@ -1201,7 +1084,7 @@ async function handleEvent(event) {
           pointsEarned = 30;
         }
 
-        if (pointsEarned > 0 && db) {
+        if (pointsEarned > 0) {
           try {
             const userRef = db.collection("users").doc(userId);
             const userDoc = await userRef.get();
