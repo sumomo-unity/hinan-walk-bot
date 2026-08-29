@@ -19,6 +19,7 @@ const client = new line.messagingApi.MessagingApiClient({
 
 // メモリ保持用フォールバック
 const memorySessions = new Map();
+const memoryPointSessions = new Map(); // ポイント利用対話用セッション
 const memoryLogs = [];
 const memoryUserPoints = new Map(); // 累計ポイント用メモリマップ
 
@@ -74,8 +75,8 @@ function getHelpMessage() {
     "現在の訓練記録を破棄して中止します。\n\n" +
     "🔹「ポイント」／「残高」\n" +
     "現在の保有ポイント残高を確認できます。\n\n" +
-    "🔹「ポイント使用」／「ポイント利用 [pt]」\n" +
-    "商店街の加盟店でポイントを利用します（例：「ポイント使用 100」）。\n\n" +
+    "🔹「ポイント使用」／「ポイント利用」\n" +
+    "商店街の加盟店でポイントを利用します。画面の案内に従って使いたいポイント数を入力してください。\n\n" +
     "🔹「避難所」\n" +
     "登録避難所一覧を表示します。\n\n" +
     "🔹「履歴」\n" +
@@ -91,7 +92,7 @@ function getHelpMessage() {
   );
 }
 
-// ── 4. セッション管理（Firestore user_sessions） ──
+// ── 4. セッション管理（避難訓練 ＆ ポイント利用） ──
 async function getSession(userId) {
   try {
     const doc = await db.collection("user_sessions").doc(userId).get();
@@ -123,9 +124,39 @@ async function deleteSession(userId) {
   memorySessions.delete(userId);
 }
 
-// ── 5. ポイント管理関数（users/{userId}/point） ──
+// ポイント利用セッション（ポイント入力〜確認の対話管理）
+async function getPointSession(userId) {
+  try {
+    const doc = await db.collection("point_sessions").doc(userId).get();
+    if (doc.exists) return doc.data();
+  } catch (e) {
+    console.error("Firestore getPointSession error:", e.message);
+  }
+  return memoryPointSessions.get(userId) || null;
+}
 
-// ユーザーの保有ポイント残高を取得
+async function savePointSession(userId, data) {
+  try {
+    await db.collection("point_sessions").doc(userId).set({
+      ...data,
+      updatedAt: FieldValue.serverTimestamp()
+    });
+  } catch (e) {
+    console.error("Firestore savePointSession error:", e.message);
+    memoryPointSessions.set(userId, data);
+  }
+}
+
+async function deletePointSession(userId) {
+  try {
+    await db.collection("point_sessions").doc(userId).delete();
+  } catch (e) {
+    console.error("Firestore deletePointSession error:", e.message);
+  }
+  memoryPointSessions.delete(userId);
+}
+
+// ── 5. ポイント管理関数（users/{userId}/point） ──
 async function getUserPoints(userId) {
   try {
     const userDoc = await db.collection("users").doc(userId).get();
@@ -139,7 +170,6 @@ async function getUserPoints(userId) {
   return memoryUserPoints.get(userId) || 0;
 }
 
-// ユーザーのポイントを加算（訓練ゴール時）
 async function addUserPoints(userId, addAmount) {
   let newTotal = 0;
   try {
@@ -156,8 +186,8 @@ async function addUserPoints(userId, addAmount) {
     await userRef.set(
       {
         point: newTotal,
-        points: newTotal, // 互換性保持
-        totalPoints: newTotal, // 互換性保持
+        points: newTotal,
+        totalPoints: newTotal,
         lastEarnedPoints: addAmount,
         lastDrillAt: FieldValue.serverTimestamp(),
         updatedAt: FieldValue.serverTimestamp()
@@ -173,7 +203,6 @@ async function addUserPoints(userId, addAmount) {
   return newTotal;
 }
 
-// ユーザーのポイントを減算（商店街での利用時）
 async function consumeUserPoints(userId, useAmount, shopId = "general_shop") {
   try {
     const userRef = db.collection("users").doc(userId);
@@ -196,7 +225,6 @@ async function consumeUserPoints(userId, useAmount, shopId = "general_shop") {
 
     const remaining = current - useAmount;
 
-    // ポイント残高を更新
     await userRef.set(
       {
         point: remaining,
@@ -207,7 +235,6 @@ async function consumeUserPoints(userId, useAmount, shopId = "general_shop") {
       { merge: true }
     );
 
-    // 取引履歴（レシート）を保存
     await db.collection("point_transactions").add({
       userId,
       shopId,
@@ -231,7 +258,7 @@ async function consumeUserPoints(userId, useAmount, shopId = "general_shop") {
   }
 }
 
-// ── 6. ログ保存 & 履歴取得（Firestore evacuation_logs） ──
+// ── 6. ログ保存 & 履歴取得 ──
 async function saveEvacuationLog(logData) {
   try {
     await db.collection("evacuation_logs").doc(logData.drillId).set({
@@ -271,7 +298,7 @@ async function getUserHistory(userId, limitCount = 5) {
     .slice(0, limitCount);
 }
 
-// ── 7. 避難所マスタ取得（Firestore shelters コレクション） ──
+// ── 7. 避難所マスタ取得 ──
 async function getShelterList() {
   try {
     const snapshot = await db.collection("shelters").get();
@@ -456,9 +483,6 @@ function calculateHaversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-/**
- * ルート上の標高データ（高低差・急勾配・坂道）を取得・判定
- */
 async function checkElevationAndSteepSlope(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
   if (!apiKey) return { hasSteepSlope: false, elevationGain: 0 };
@@ -501,7 +525,7 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
   const apiKey = config.googleMapsApiKey;
 
   if (apiKey) {
-    // 1. Google Maps Routes API を試行
+    // 1. Routes API
     try {
       const response = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
         method: "POST",
@@ -552,7 +576,7 @@ async function getWalkingRoute(originLat, originLng, destLat, destLng) {
       console.warn("Routes API 接続エラー:", err.message);
     }
 
-    // 2. Directions API でリトライ
+    // 2. Directions API
     try {
       const dirUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${originLat},${originLng}&destination=${destLat},${destLng}&mode=walking&key=${apiKey}`;
       const dirResponse = await fetch(dirUrl);
@@ -745,57 +769,49 @@ app.post("/webhook", line.middleware(config), (req, res) => {
     });
 });
 
-// B. 商店街 店舗QR用 ポイント使用エンドポイント (/usePoint)
+// B. 商店街 店舗QR用 エンドポイント（QR読み取り時にLINEを開く）
 app.get("/usePoint", async (req, res) => {
   const shopId = req.query.shopId || "001";
   const userId = req.query.userId;
-  const usePoint = parseInt(req.query.points || "100", 10);
+  const usePoint = parseInt(req.query.points || "0", 10);
 
-  if (!userId) {
-    return res.status(400).send("<html><body><h2>⚠️ ユーザーIDが指定されていません。</h2></body></html>");
+  if (userId && usePoint > 0) {
+    const result = await consumeUserPoints(userId, usePoint, shopId);
+    if (result.success) {
+      try {
+        await client.pushMessage({
+          to: userId,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🛍️ 【商店街ポイント利用完了】\n━━━━━━━━━━━━━━\n` +
+                `🏪 店舗ID: ${shopId}\n` +
+                `💸 ご利用ポイント: ${usePoint} pt\n` +
+                `🪙 残りポイント残高: ${result.remaining} pt\n` +
+                `━━━━━━━━━━━━━━\nご利用ありがとうございました！`
+            }
+          ]
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    return res.send(`<html><body><h2>${result.success ? "ポイント利用完了" : result.message}</h2></body></html>`);
   }
 
-  const result = await consumeUserPoints(userId, usePoint, shopId);
-
-  if (!result.success) {
-    return res.status(400).send(`<html><body><h2>⚠️ ${result.message}</h2><p>現在の残高: ${result.remaining} pt</p></body></html>`);
-  }
-
-  // LINE にプッシュ通知でレシートを送る
-  try {
-    await client.pushMessage({
-      to: userId,
-      messages: [
-        {
-          type: "text",
-          text:
-            `🛍️ 【商店街ポイント利用完了】\n━━━━━━━━━━━━━━\n` +
-            `🏪 店舗ID: ${shopId}\n` +
-            `💸 ご利用ポイント: ${usePoint} pt\n` +
-            `🪙 残りポイント残高: ${result.remaining} pt\n` +
-            `━━━━━━━━━━━━━━\nご利用ありがとうございました！`
-        }
-      ]
-    });
-  } catch (pushErr) {
-    console.warn("LINE push message error:", pushErr.message);
-  }
-
-  return res.status(200).send(`
+  return res.send(`
     <html>
       <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
       <body style="font-family: sans-serif; text-align: center; padding: 40px 20px;">
-        <h1 style="color: #27ae60;">🎉 ポイント利用完了</h1>
-        <p style="font-size: 18px;">店舗: <strong>${shopId}</strong></p>
-        <p style="font-size: 24px; color: #e74c3c; font-weight: bold;">-${usePoint} pt</p>
-        <p style="font-size: 16px; color: #555;">残りポイント残高: <strong>${result.remaining} pt</strong></p>
-        <p style="margin-top: 30px; font-size: 14px; color: #888;">LINEに利用通知を送信しました。この画面を閉じてください。</p>
+        <h2>🏪 店舗コード: ${shopId}</h2>
+        <p>LINE Botで「ポイント使用」と送信してポイントをご利用ください。</p>
       </body>
     </html>
   `);
 });
 
-// C. 研究用 CSV エクスポートエンドポイント
+// C. CSV エクスポート
 app.get("/export/csv", async (req, res) => {
   const reqKey = req.query.key;
   if (reqKey !== config.adminExportKey) {
@@ -867,7 +883,7 @@ app.get("/export/csv", async (req, res) => {
   }
 });
 
-// D. CSVインポートAPI
+// D. CSVインポート
 app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => {
   try {
     const csvText = req.body;
@@ -889,7 +905,7 @@ app.post("/import/shelters", express.text({ type: "*/*" }), async (req, res) => 
   }
 });
 
-// E. 危険箇所QRエンドポイント
+// E. 危険箇所QR
 app.get("/hazard", async (req, res) => {
   try {
     const hazardId = req.query.id;
@@ -939,6 +955,7 @@ async function handleEvent(event) {
 
   try {
     let session = await getSession(userId);
+    let pointSession = await getPointSession(userId);
 
     // 1. Postback イベント処理
     if (event.type === "postback") {
@@ -978,11 +995,13 @@ async function handleEvent(event) {
           });
         }
 
-        // ポイント利用確認（Postback）
-        if (data.action === "confirm_use_point") {
-          const useAmount = data.points || 100;
-          const shopId = data.shopId || "001";
+        // ポイント利用実行（「はい」ボタン押下時）
+        if (data.action === "execute_use_point") {
+          const useAmount = data.points;
+          const shopId = data.shopId || "商店街加盟店";
+
           const result = await consumeUserPoints(userId, useAmount, shopId);
+          await deletePointSession(userId); // ポイント対話セッション終了
 
           if (!result.success) {
             return await client.replyMessage({
@@ -1006,6 +1025,15 @@ async function handleEvent(event) {
             ]
           });
         }
+
+        // ポイント利用キャンセル
+        if (data.action === "cancel_use_point") {
+          await deletePointSession(userId);
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [{ type: "text", text: "ポイントの利用をキャンセルしました。" }]
+          });
+        }
       } catch (e) {
         console.error("Postback parse error:", e);
       }
@@ -1016,7 +1044,198 @@ async function handleEvent(event) {
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
 
-      // ── A. 「ポイント確認」コマンド ──
+      // ── A. ポイント利用中の対話処理（ポイント数入力待ち時） ──
+      if (pointSession && pointSession.status === "WAITING_POINT_AMOUNT") {
+        if (text === "キャンセル" || text === "やめる" || text === "中止") {
+          await deletePointSession(userId);
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [{ type: "text", text: "ポイント利用をキャンセルしました。" }]
+          });
+        }
+
+        const inputPoints = parseInt(text, 10);
+        const currentPoints = await getUserPoints(userId);
+
+        if (isNaN(inputPoints) || inputPoints <= 0) {
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  "⚠️ 使いたいポイント数を半角数字で入力してください。（例: 100）\n\n" +
+                  "※キャンセルする場合は「キャンセル」と送信してください。"
+              }
+            ]
+          });
+        }
+
+        if (inputPoints > currentPoints) {
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  `⚠️ 保有ポイント（${currentPoints} pt）を超えるポイント数は指定できません。\n` +
+                  `${currentPoints} pt 以下の数字を入力してください。`
+              }
+            ]
+          });
+        }
+
+        // 確認画面（Flex メッセージ）を送信
+        const shopId = pointSession.shopId || "商店街加盟店";
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "flex",
+              altText: "ポイント利用確認",
+              contents: {
+                type: "bubble",
+                size: "kilo",
+                header: {
+                  type: "box",
+                  layout: "vertical",
+                  backgroundColor: "#27ae60",
+                  contents: [
+                    {
+                      type: "text",
+                      text: "🛍️ ポイント利用の確認",
+                      color: "#ffffff",
+                      weight: "bold",
+                      size: "sm"
+                    }
+                  ]
+                },
+                body: {
+                  type: "box",
+                  layout: "vertical",
+                  spacing: "md",
+                  contents: [
+                    {
+                      type: "text",
+                      text: `🏪 店舗: ${shopId}`,
+                      size: "sm",
+                      color: "#555555"
+                    },
+                    {
+                      type: "text",
+                      text: `💸 利用ポイント: ${inputPoints} pt`,
+                      size: "lg",
+                      weight: "bold",
+                      color: "#e74c3c"
+                    },
+                    {
+                      type: "text",
+                      text: `🪙 利用後残高: ${currentPoints - inputPoints} pt`,
+                      size: "xs",
+                      color: "#888888"
+                    },
+                    {
+                      type: "text",
+                      text: "ポイントを使用しますか？",
+                      size: "sm",
+                      weight: "bold",
+                      margin: "sm"
+                    }
+                  ]
+                },
+                footer: {
+                  type: "box",
+                  layout: "horizontal",
+                  spacing: "sm",
+                  contents: [
+                    {
+                      type: "button",
+                      style: "primary",
+                      color: "#27ae60",
+                      height: "sm",
+                      action: {
+                        type: "postback",
+                        label: "✅ はい（使用）",
+                        data: JSON.stringify({
+                          action: "execute_use_point",
+                          points: inputPoints,
+                          shopId: shopId
+                        }),
+                        displayText: `${inputPoints} pt を使用します`
+                      }
+                    },
+                    {
+                      type: "button",
+                      style: "secondary",
+                      height: "sm",
+                      action: {
+                        type: "postback",
+                        label: "❌ キャンセル",
+                        data: JSON.stringify({ action: "cancel_use_point" }),
+                        displayText: "キャンセル"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        });
+      }
+
+      // ── B. 「ポイント使用」コマンド（ポイント利用の開始） ──
+      if (
+        text.startsWith("ポイント使用") ||
+        text.startsWith("ポイント利用") ||
+        text.startsWith("ポイントを使う") ||
+        text.startsWith("ポイント") && (text.includes("使") || text.includes("払"))
+      ) {
+        const currentPoints = await getUserPoints(userId);
+
+        if (currentPoints <= 0) {
+          return await client.replyMessage({
+            replyToken: event.replyToken,
+            messages: [
+              {
+                type: "text",
+                text:
+                  "🪙 現在利用できるポイントがありません（残高: 0 pt）。\n" +
+                  "避難訓練を実施してポイントを獲得しましょう！"
+              }
+            ]
+          });
+        }
+
+        // 店舗IDが指定されているか（例: 「ポイント使用 shop001」）
+        const parts = text.split(/\s+/);
+        let shopId = "商店街加盟店";
+        if (parts.length >= 2 && isNaN(parseInt(parts[1], 10))) {
+          shopId = parts[1];
+        }
+
+        // 対話セッションを「ポイント数入力待ち」に保存
+        await savePointSession(userId, {
+          status: "WAITING_POINT_AMOUNT",
+          shopId: shopId
+        });
+
+        return await client.replyMessage({
+          replyToken: event.replyToken,
+          messages: [
+            {
+              type: "text",
+              text:
+                `🪙 【商店街ポイント利用】\n━━━━━━━━━━━━━━\n` +
+                `現在の保有残高: ${currentPoints} pt\n\n` +
+                `使いたいポイント数を半角数字で入力して送信してください。\n` +
+                `（例: 50、100、${currentPoints}）\n\n` +
+                `※キャンセルする場合は「キャンセル」と送信してください。`
+            }
+          ]
+        });
+      }
+
+      // ── C. 「ポイント確認」コマンド ──
       if (
         text === "ポイント" ||
         text === "ポイント確認" ||
@@ -1035,54 +1254,16 @@ async function handleEvent(event) {
                 `現在の保有ポイント: ${currentPoints} pt\n` +
                 `━━━━━━━━━━━━━━\n\n` +
                 `🏪 商店街の加盟店で 1pt = 1円 としてご利用いただけます！\n` +
-                `・「ポイント使用 100」のように送信するか、店頭のQRコードを読み取ってご利用ください。`
+                `・利用するには「ポイント使用」と送信してください。`
             }
           ]
         });
       }
 
-      // ── B. 「ポイント使用」コマンド（商店街での減算処理） ──
-      if (text.startsWith("ポイント使用") || text.startsWith("ポイント利用") || text.startsWith("ポイントを使う")) {
-        // 例: 「ポイント使用 100」や「ポイント使用 50 001」など
-        const parts = text.split(/\s+/);
-        let useAmount = 100; // デフォルト100pt
-        let shopId = "商店街加盟店";
-
-        if (parts.length >= 2 && !isNaN(parseInt(parts[1], 10))) {
-          useAmount = parseInt(parts[1], 10);
-        }
-        if (parts.length >= 3) {
-          shopId = parts[2];
-        }
-
-        const result = await consumeUserPoints(userId, useAmount, shopId);
-
-        if (!result.success) {
-          return await client.replyMessage({
-            replyToken: event.replyToken,
-            messages: [{ type: "text", text: `⚠️ ${result.message}` }]
-          });
-        }
-
-        return await client.replyMessage({
-          replyToken: event.replyToken,
-          messages: [
-            {
-              type: "text",
-              text:
-                `🛍️ 【ポイント利用完了】\n━━━━━━━━━━━━━━\n` +
-                `🏪 ご利用店舗: ${shopId}\n` +
-                `💸 ${useAmount} pt を使用しました。\n` +
-                `🪙 残りポイント残高: ${result.remaining} pt\n` +
-                `━━━━━━━━━━━━━━\nまたのご利用をお待ちしております！`
-            }
-          ]
-        });
-      }
-
-      // ── C. 「スタート」コマンド ──
+      // ── D. 「スタート」コマンド ──
       if (text === "スタート" || text === "開始" || text === "避難訓練") {
         await deleteSession(userId);
+        await deletePointSession(userId);
         const shelters = await getShelterList();
 
         return await client.replyMessage({
@@ -1100,7 +1281,7 @@ async function handleEvent(event) {
         });
       }
 
-      // ── D. 訓練中のテキストコマンド処理 ──
+      // ── E. 訓練中のテキストコマンド処理 ──
       if (session) {
         // リセット
         if (text === "リセット" || text === "中止" || text === "キャンセル") {
@@ -1175,7 +1356,7 @@ async function handleEvent(event) {
         });
       }
 
-      // ── E. 訓練前の避難所・履歴・案内 ──
+      // ── F. 訓練前の避難所・履歴・案内 ──
 
       // 避難所一覧
       if (text === "避難所") {
@@ -1469,7 +1650,7 @@ async function handleEvent(event) {
         };
 
         await saveEvacuationLog(logData);
-        await deleteSession(userId); // 次回訓練時は0から加算開始
+        await deleteSession(userId);
 
         const statusMsg = isArrived
           ? `🎉 目標避難所「${shelter.name}」に無事到着しました！（残距離 ${Math.round(remainingMeters)}m）`
