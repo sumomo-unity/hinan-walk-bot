@@ -71,6 +71,8 @@ function getHelpMessage() {
     "避難所一覧が表示されます。目標避難所を選択後、【位置情報】を送信して避難訓練を開始します。\n\n" +
     "🔹「ゴール」\n" +
     "避難所到着時に送信します。現在地の【位置情報】を送ると、避難時間・移動距離・獲得ポイントが表示されます。\n\n" +
+    "🔹「📸 写真送信（危険箇所登録）」\n" +
+    "避難路の危険箇所の写真を送信すると、位置情報・危険の種類・コメントを記録できます（訓練中でも記録可能）。\n\n" +
     "🔹「リセット」\n" +
     "現在の訓練記録を破棄して中止します。\n\n" +
     "🔹「ポイント」／「残高」\n" +
@@ -92,7 +94,7 @@ function getHelpMessage() {
   );
 }
 
-// ── 4. セッション管理（避難訓練 ＆ ポイント利用） ──
+// ── 4. セッション管理（避難訓練 ＆ ポイント利用 ＆ 危険箇所報告） ──
 async function getSession(userId) {
   try {
     const doc = await db.collection("user_sessions").doc(userId).get();
@@ -122,6 +124,16 @@ async function deleteSession(userId) {
     console.error("Firestore deleteSession error:", e.message);
   }
   memorySessions.delete(userId);
+}
+
+/**
+ * 危険箇所登録用のセッション情報のみを安全にクリアする関数
+ * （避難訓練中のステータスやスタート位置情報を消去せずに保持します）
+ */
+async function clearHazardSession(userId) {
+  const session = (await getSession(userId)) || {};
+  const { hazardStep, hazardImageId, hazardLocation, hazardType, ...trainingSession } = session;
+  await saveSession(userId, trainingSession);
 }
 
 // ポイント利用対話セッション
@@ -458,7 +470,7 @@ async function importSheltersFromCsv(csvText) {
         tagColor: item.tagColor,
         lat: lat, // ← Geocoding API の正確な緯度
         lng: lng, // ← Geocoding API の正確な経度
-        updatedAt: FieldValue.serverTimestamp() // ← 更新日時
+        updatedAt: FieldValue.serverTimestamp()
       };
 
       // 3. { merge: true } により手動追加フィールド（入口座標など）を保護
@@ -967,6 +979,162 @@ app.get("/hazard", async (req, res) => {
   }
 });
 
+// ── 11.5. 危険箇所登録ハンドラ関数群（新規追加） ──
+
+/**
+ * ① 写真受信ハンドラー
+ * 写真IDを保存し、その地点の位置情報送信を要求
+ */
+async function handleHazardImage(event) {
+  const userId = event.source.userId || "anonymous";
+  const imageId = event.message.id;
+
+  const session = (await getSession(userId)) || {};
+
+  // 避難訓練の既存データを保持したまま、危険箇所の撮影ステップへ更新
+  await saveSession(userId, {
+    ...session,
+    hazardImageId: imageId,
+    hazardStep: "waitLocation"
+  });
+
+  await client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text: "写真を受け取りました！📸\nこの写真の撮影場所（危険箇所）の位置情報を送信してください。",
+        quickReply: {
+          items: [
+            {
+              type: "action",
+              action: {
+                type: "location",
+                label: "📍 危険箇所の位置を送る"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  });
+}
+
+/**
+ * ② 危険箇所位置情報受信ハンドラー
+ * 撮影地点の座標を hazardLocation に保存し、危険種類の選択肢を提示
+ */
+async function handleHazardLocation(event) {
+  const userId = event.source.userId || "anonymous";
+  const session = await getSession(userId);
+
+  if (!session || session.hazardStep !== "waitLocation") return;
+
+  const lat = event.message.latitude;
+  const lng = event.message.longitude;
+
+  await saveSession(userId, {
+    ...session,
+    hazardLocation: { lat, lng },
+    hazardStep: "selectType"
+  });
+
+  await client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text: "この場所にはどのような危険がありますか？該当するものを選択してください。",
+        quickReply: {
+          items: [
+            { type: "action", action: { type: "message", label: "夜間に暗い地点", text: "危険:夜間暗い" } },
+            { type: "action", action: { type: "message", label: "冠水の危険", text: "危険:冠水" } },
+            { type: "action", action: { type: "message", label: "急傾斜（避難困難）", text: "危険:急傾斜" } },
+            { type: "action", action: { type: "message", label: "階段あり（避難困難）", text: "危険:階段" } },
+            { type: "action", action: { type: "message", label: "道路の危険（凹み/狭小）", text: "危険:道路" } }
+          ]
+        }
+      }
+    ]
+  });
+}
+
+/**
+ * ③ 危険種類選択ハンドラー
+ * 選択種別を保存し、詳細コメントの入力を要求
+ */
+async function handleHazardType(event) {
+  const userId = event.source.userId || "anonymous";
+  const session = await getSession(userId);
+
+  if (!session || session.hazardStep !== "selectType") return;
+
+  const hazardType = event.message.text.replace("危険:", "").trim();
+
+  await saveSession(userId, {
+    ...session,
+    hazardType,
+    hazardStep: "comment"
+  });
+
+  await client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text: `【種別: ${hazardType}】を選択しました。\nこの危険箇所に関するコメントや補足情報（例: 街灯が消えている、道幅が狭いなど）を入力して送信してください。`
+      }
+    ]
+  });
+}
+
+/**
+ * ④ 危険箇所保存ハンドラー
+ * コメントを受け取り Firestore (hazards コレクション) へ登録し、危険箇所セッションを安全に初期化
+ */
+async function saveHazard(event) {
+  const userId = event.source.userId || "anonymous";
+  const session = await getSession(userId);
+
+  if (!session || session.hazardStep !== "comment") return;
+
+  const comment = event.message.text.trim();
+  const { lat, lng } = session.hazardLocation || {};
+  const hazardType = session.hazardType || "その他";
+  const imageId = session.hazardImageId || null;
+
+  const hazardId = `hazard_${Date.now()}`;
+
+  // Firestore の hazards コレクションへ保存
+  await db.collection("hazards").doc(hazardId).set({
+    id: hazardId,
+    userId,
+    type: hazardType,
+    comment,
+    lat: lat || null,
+    lng: lng || null,
+    imageId,
+    createdAt: FieldValue.serverTimestamp()
+  });
+
+  // 危険箇所のセッションのみをクリア（避難訓練データは維持）
+  await clearHazardSession(userId);
+
+  await client.replyMessage({
+    replyToken: event.replyToken,
+    messages: [
+      {
+        type: "text",
+        text:
+          `⚠️ 危険箇所を登録しました！\n\n` +
+          `【種別】${hazardType}\n` +
+          `【コメント】${comment}\n\n` +
+          `自治体の防災マップ作成へのご協力ありがとうございます。\n引き続き避難訓練を続けてください。`
+      }
+    ]
+  });
+}
+
 // ── 12. メインイベント振り分けハンドラ ──
 async function handleEvent(event) {
   const userId = event.source.userId || "anonymous";
@@ -974,6 +1142,11 @@ async function handleEvent(event) {
   try {
     let session = await getSession(userId);
     let pointSession = await getPointSession(userId);
+
+    // 0. 写真（画像）メッセージ受信時の処理
+    if (event.type === "message" && event.message.type === "image") {
+      return await handleHazardImage(event);
+    }
 
     // 1. Postback イベント処理
     if (event.type === "postback") {
@@ -1061,6 +1234,16 @@ async function handleEvent(event) {
     // 2. テキストメッセージ処理
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
+
+      // ── 危険箇所：危険種類選択（クイックリプライ押下時） ──
+      if (text.startsWith("危険:")) {
+        return await handleHazardType(event);
+      }
+
+      // ── 危険箇所：コメント入力待ち状態の処理 ──
+      if (session && session.hazardStep === "comment") {
+        return await saveHazard(event);
+      }
 
       // ── A. 店舗QRコード読み取り成功時の処理（例: 「店舗_001」や「shop_xxx」） ──
       if (
@@ -1510,6 +1693,7 @@ async function handleEvent(event) {
               type: "text",
               text:
                 "現在、避難訓練の計測中です。\n\n" +
+                "・写真を送ると危険箇所を記録できます📸\n" +
                 "・ゴールする場合は「ゴール」と送信\n" +
                 "・やり直す場合は「リセット」と送信してください。"
             }
@@ -1632,6 +1816,7 @@ async function handleEvent(event) {
               "メッセージありがとうございます。\n\n" +
               "【ご利用方法】\n" +
               "・「スタート」: 避難訓練を開始します\n" +
+              "・写真を送信: 危険箇所を登録します📸\n" +
               "・「ポイント」: 保有ポイント残高を確認します\n" +
               "・「ポイント使用」: 商店街でポイントを利用します\n" +
               "・「避難所」: 登録されている避難所一覧を表示します\n" +
@@ -1659,6 +1844,11 @@ async function handleEvent(event) {
             }
           ]
         });
+      }
+
+      // ── 危険箇所の位置情報待ち状態の場合 ──
+      if (session && session.hazardStep === "waitLocation") {
+        return await handleHazardLocation(event);
       }
 
       // 訓練前：最寄り避難所検索
@@ -1836,7 +2026,7 @@ async function handleEvent(event) {
                 `━━━━━━━━━━━━━━\n` +
                 `🪙 現在の保有ポイント: ${totalPoints} pt\n` +
                 `（※今回の獲得分が加算されました。商店街加盟店で利用できます！）\n\n` +
-                `おつかれさでした！日頃からの備えと経路の確認を心がけましょう。`
+                `おつかれさまでした！日頃からの備えと経路の確認を心がけましょう。`
             }
           ]
         });
