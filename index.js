@@ -998,19 +998,19 @@ async function handleHazardImage(event) {
     hazardStep: "waitLocation"
   });
 
-  await client.replyMessage({
+  return await client.replyMessage({
     replyToken: event.replyToken,
     messages: [
       {
         type: "text",
-        text: "写真を受け取りました！📸\nこの写真の撮影場所（危険箇所）の位置情報を送信してください。",
+        text: "この写真の位置を送ってください。",
         quickReply: {
           items: [
             {
               type: "action",
               action: {
                 type: "location",
-                label: "📍 危険箇所の位置を送る"
+                label: "📍 位置情報を送る"
               }
             }
           ]
@@ -1039,19 +1039,19 @@ async function handleHazardLocation(event) {
     hazardStep: "selectType"
   });
 
-  await client.replyMessage({
+  return await client.replyMessage({
     replyToken: event.replyToken,
     messages: [
       {
         type: "text",
-        text: "この場所にはどのような危険がありますか？該当するものを選択してください。",
+        text: "この場所はどのような危険がありますか？",
         quickReply: {
           items: [
             { type: "action", action: { type: "message", label: "夜間に暗い地点", text: "危険:夜間暗い" } },
             { type: "action", action: { type: "message", label: "冠水の危険", text: "危険:冠水" } },
-            { type: "action", action: { type: "message", label: "急傾斜（避難困難）", text: "危険:急傾斜" } },
-            { type: "action", action: { type: "message", label: "階段あり（避難困難）", text: "危険:階段" } },
-            { type: "action", action: { type: "message", label: "道路の危険（凹み/狭小）", text: "危険:道路" } }
+            { type: "action", action: { type: "message", label: "急傾斜", text: "危険:急傾斜" } },
+            { type: "action", action: { type: "message", label: "階段あり", text: "危険:階段" } },
+            { type: "action", action: { type: "message", label: "道路の危険", text: "危険:道路" } }
           ]
         }
       }
@@ -1073,16 +1073,16 @@ async function handleHazardType(event) {
 
   await saveSession(userId, {
     ...session,
-    hazardType,
+    hazardType: hazardType,
     hazardStep: "comment"
   });
 
-  await client.replyMessage({
+  return await client.replyMessage({
     replyToken: event.replyToken,
     messages: [
       {
         type: "text",
-        text: `【種別: ${hazardType}】を選択しました。\nこの危険箇所に関するコメントや補足情報（例: 街灯が消えている、道幅が狭いなど）を入力して送信してください。`
+        text: "この危険箇所についてコメントを入力してください。"
       }
     ]
   });
@@ -1113,23 +1113,19 @@ async function saveHazard(event) {
     comment,
     lat: lat || null,
     lng: lng || null,
-    imageId,
+    imageId: imageId,
     createdAt: FieldValue.serverTimestamp()
   });
 
   // 危険箇所のセッションのみをクリア（避難訓練データは維持）
   await clearHazardSession(userId);
 
-  await client.replyMessage({
+  return await client.replyMessage({
     replyToken: event.replyToken,
     messages: [
       {
         type: "text",
-        text:
-          `⚠️ 危険箇所を登録しました！\n\n` +
-          `【種別】${hazardType}\n` +
-          `【コメント】${comment}\n\n` +
-          `自治体の防災マップ作成へのご協力ありがとうございます。\n引き続き避難訓練を続けてください。`
+        text: "危険箇所を登録しました。ご協力ありがとうございます！"
       }
     ]
   });
@@ -1143,9 +1139,28 @@ async function handleEvent(event) {
     let session = await getSession(userId);
     let pointSession = await getPointSession(userId);
 
-    // 0. 写真（画像）メッセージ受信時の処理
+    // ── 危険箇所 0: 写真（画像）メッセージ受信時 ──
     if (event.type === "message" && event.message.type === "image") {
       return await handleHazardImage(event);
+    }
+
+    // ── 危険箇所 1: 位置情報メッセージ受信時（危険箇所用） ──
+    if (event.type === "message" && event.message.type === "location") {
+      if (session && session.hazardStep === "waitLocation") {
+        return await handleHazardLocation(event);
+      }
+    }
+
+    // ── 危険箇所 2: 危険種類選択時（「危険:〇〇」） ──
+    if (event.type === "message" && event.message.type === "text" && event.message.text.startsWith("危険:")) {
+      return await handleHazardType(event);
+    }
+
+    // ── 危険箇所 3: コメント入力待ち時 ──
+    if (event.type === "message" && event.message.type === "text") {
+      if (session && session.hazardStep === "comment") {
+        return await saveHazard(event);
+      }
     }
 
     // 1. Postback イベント処理
@@ -1234,16 +1249,6 @@ async function handleEvent(event) {
     // 2. テキストメッセージ処理
     if (event.type === "message" && event.message.type === "text") {
       const text = event.message.text.trim();
-
-      // ── 危険箇所：危険種類選択（クイックリプライ押下時） ──
-      if (text.startsWith("危険:")) {
-        return await handleHazardType(event);
-      }
-
-      // ── 危険箇所：コメント入力待ち状態の処理 ──
-      if (session && session.hazardStep === "comment") {
-        return await saveHazard(event);
-      }
 
       // ── A. 店舗QRコード読み取り成功時の処理（例: 「店舗_001」や「shop_xxx」） ──
       if (
@@ -1844,11 +1849,6 @@ async function handleEvent(event) {
             }
           ]
         });
-      }
-
-      // ── 危険箇所の位置情報待ち状態の場合 ──
-      if (session && session.hazardStep === "waitLocation") {
-        return await handleHazardLocation(event);
       }
 
       // 訓練前：最寄り避難所検索
