@@ -399,10 +399,10 @@ async function importSheltersFromCsv(csvText) {
   const headerMap = {};
 
   rawHeader.forEach((h, index) => {
-    headerMap[h.toLowerCase()] = index;
+    headerMap[h.trim().toLowerCase()] = index;
   });
 
-  const requiredFields = ["id", "name", "address", "type", "city", "prefecture", "tagcolor"];
+  const requiredFields = ["id", "name", "address", "type", "city", "prefecture"];
   const missingFields = requiredFields.filter((f) => !(f in headerMap));
 
   if (missingFields.length > 0) {
@@ -420,31 +420,49 @@ async function importSheltersFromCsv(csvText) {
       continue;
     }
 
-    const item = {
-      id: cols[headerMap["id"]],
-      name: cols[headerMap["name"]],
-      address: cols[headerMap["address"]],
-      type: cols[headerMap["type"]],
-      city: cols[headerMap["city"]],
-      prefecture: cols[headerMap["prefecture"]],
-      tagColor: cols[headerMap["tagcolor"]] || "#2980b9"
-    };
+    const id = cols[headerMap["id"]];
+    const name = cols[headerMap["name"]];
+    const address = cols[headerMap["address"]];
+    const type = cols[headerMap["type"]];
+    const city = cols[headerMap["city"]];
+    const prefecture = cols[headerMap["prefecture"]];
+    const tagColorRaw = "tagcolor" in headerMap ? cols[headerMap["tagcolor"]] : null;
 
-    if (!item.id || !item.name) {
+    if (!id || !name) {
       errors.push(`行 ${i + 1}: id または name が空です`);
       continue;
     }
 
+    const item = {
+      id,
+      name,
+      address,
+      type,
+      city,
+      prefecture,
+      tagColor: (tagColorRaw && tagColorRaw.trim()) || "#2980b9"
+    };
+
     try {
+      // 1. Google Maps Geocoding API から最新の正確な座標を取得
       const { lat, lng } = await geocodeAddress(item);
 
+      // 2. CSV側の座標情報は完全に破棄し、Geocoding API の最新座標のみを格納
       const shelterData = {
-        ...item,
-        lat,
-        lng
+        id: item.id,
+        name: item.name,
+        address: item.address,
+        type: item.type,
+        city: item.city,
+        prefecture: item.prefecture,
+        tagColor: item.tagColor,
+        lat: lat, // ← Geocoding API の正確な緯度
+        lng: lng, // ← Geocoding API の正確な経度
+        updatedAt: FieldValue.serverTimestamp() // ← 更新日時
       };
 
-      await db.collection("shelters").doc(shelterData.id).set(shelterData);
+      // 3. { merge: true } により手動追加フィールド（入口座標など）を保護
+      await db.collection("shelters").doc(shelterData.id).set(shelterData, { merge: true });
       successShelters.push(shelterData);
       await sleep(200);
     } catch (err) {
@@ -1818,7 +1836,7 @@ async function handleEvent(event) {
                 `━━━━━━━━━━━━━━\n` +
                 `🪙 現在の保有ポイント: ${totalPoints} pt\n` +
                 `（※今回の獲得分が加算されました。商店街加盟店で利用できます！）\n\n` +
-                `おつかれさまでした！日頃からの備えと経路の確認を心がけましょう。`
+                `おつかれさでした！日頃からの備えと経路の確認を心がけましょう。`
             }
           ]
         });
